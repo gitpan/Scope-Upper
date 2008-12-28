@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.01';
+ $VERSION = '0.02';
 }
 
 =head1 SYNOPSIS
@@ -87,15 +87,16 @@ For example, if C<$value> is a scalar reference, then the C<SCALAR> slot of the 
 
 =item *
 
-A string beginning with a sigil, representing the symbol to localize and assign to.
-If the sigil is C<'$'>, then C<$value> isn't dereferenced, that is
+A string beginning with a sigil, representing the symbol to localize and to assign to.
+If the sigil is C<'$'>, L</localize> follows the same syntax as C<local $x = $value>, i.e. C<$value> isn't dereferenced.
+For example,
 
     localize '$x', \'foo' => 0;
 
 will set C<$x> to a reference to the string C<'foo'>.
-Other sigils behave as if a glob was passed.
+Other sigils (C<'@'>, C<'%'>, C<'&'> and C<'*'>) require C<$value> to be a reference of the corresponding type.
 
-The symbol is resolved when the actual localization takes place and not when C<localize> is called.
+When the symbol is given by a string, it is resolved when the actual localization takes place and not when C<localize> is called.
 This means that
 
     sub tag { localize '$x', $_[0] => 1; }
@@ -129,6 +130,31 @@ our %EXPORT_TAGS = (
 our @EXPORT_OK   = map { @$_ } values %EXPORT_TAGS;
 $EXPORT_TAGS{'all'} = [ @EXPORT_OK ];
 
+=head1 CAVEATS
+
+Be careful that local variables are restored in the reverse order in which they were localized.
+Consider those examples:
+
+    local $x = 0;
+    {
+     reap sub { print $x } => 0;
+     local $x = 1;
+     ...
+    }
+    # prints '0'
+    ...
+    {
+     local $x = 1;
+     reap sub { $x = 2 } => 0;
+     ...
+    }
+    # $x is 0
+
+The first case is "solved" by moving the C<local> before the C<reap>, and the second by using L</localize> instead of L</reap>.
+
+L</reap>, L</localize> and L</localize_elem> effects can't cross C<BEGIN> blocks, hence calling those functions in C<import> is deemed to be useless.
+This is an hopeless case because C<BEGIN> blocks are executed once while localizing constructs should do their job at each run.
+
 =head1 DEPENDENCIES
 
 L<XSLoader> (standard since perl 5.006).
@@ -152,6 +178,8 @@ Please report any bugs or feature requests to C<bug-scope-upper at rt.cpan.org>,
 You can find documentation for this module with the perldoc command.
 
     perldoc Scope::Upper
+
+Tests code coverage report is available at L<http://www.profvince.com/perl/cover/Scope-Upper>.
 
 =head1 ACKNOWLEDGEMENTS
 

@@ -10,6 +10,8 @@
 # define SU_DEBUG 0
 #endif
 
+/* --- Compatibility ------------------------------------------------------- */
+
 #ifndef STMT_START
 # define STMT_START do
 #endif
@@ -22,6 +24,10 @@
 # define SU_D(X) STMT_START X STMT_END
 #else
 # define SU_D(X)
+#endif
+
+#ifndef Newx
+# define Newx(v, n, c) New(0, v, n, c)
 #endif
 
 #ifndef SvPV_const
@@ -40,7 +46,114 @@
 # define gv_fetchpvn_flags(A, B, C, D) gv_fetchpv((A), (C), (D))
 #endif
 
+#ifndef PERL_MAGIC_tied
+# define PERL_MAGIC_tied 'P'
+#endif
+
+#ifndef PERL_MAGIC_env
+# define PERL_MAGIC_env 'E'
+#endif
+
 #define SU_HAS_PERL(R, V, S) (PERL_REVISION > (R) || (PERL_REVISION == (R) && (PERL_VERSION > (V) || (PERL_VERSION == (V) && (PERL_SUBVERSION >= (S))))))
+
+/* --- Stack manipulations ------------------------------------------------- */
+
+#ifndef SvCANEXISTDELETE
+# define SvCANEXISTDELETE(sv) \
+  (!SvRMAGICAL(sv)            \
+   || ((mg = mg_find((SV *) sv, PERL_MAGIC_tied))            \
+       && (stash = SvSTASH(SvRV(SvTIED_obj((SV *) sv, mg)))) \
+       && gv_fetchmethod_autoload(stash, "EXISTS", TRUE)     \
+       && gv_fetchmethod_autoload(stash, "DELETE", TRUE)     \
+      )                       \
+   )
+#endif
+
+/* ... Saving array elements ............................................... */
+
+STATIC I32 su_av_preeminent(pTHX_ AV *av, I32 key) {
+#define su_av_preeminent(A, K) su_av_preeminent(aTHX_ (A), (K))
+ MAGIC *mg;
+ HV *stash;
+
+ if (!av) return 0;
+ if (SvCANEXISTDELETE(av))
+  return av_exists(av, key);
+
+ return 1;
+}
+
+#ifndef SAVEADELETE
+
+typedef struct {
+ AV *av;
+ I32 key;
+} su_ud_adelete;
+
+STATIC void su_adelete(pTHX_ void *ud_) {
+ su_ud_adelete *ud = ud_;
+
+ av_delete(ud->av, ud->key, G_DISCARD);
+ SvREFCNT_dec(ud->av);
+
+ Safefree(ud);
+}
+
+STATIC void su_save_adelete(pTHX_ AV *av, I32 key) {
+#define su_save_adelete(A, K) su_save_adelete(aTHX_ (A), (K))
+ su_ud_adelete *ud;
+
+ Newx(ud, 1, su_ud_adelete);
+ ud->av  = av;
+ ud->key = key;
+ SvREFCNT_inc(av);
+
+ SAVEDESTRUCTOR_X(su_adelete, ud);
+}
+
+#define SAVEADELETE(A, K) su_save_adelete((A), (K))
+
+#endif /* SAVEADELETE */
+
+STATIC void su_save_aelem(pTHX_ AV *av, I32 key, SV **svp, I32 preeminent) {
+#define su_save_aelem(A, K, S, P) su_save_aelem(aTHX_ (A), (K), (S), (P))
+ if (preeminent)
+  save_aelem(av, key, svp);
+ else
+  SAVEADELETE(av, key);
+}
+
+/* ... Saving hash elements ................................................ */
+
+STATIC I32 su_hv_preeminent(pTHX_ HV *hv, SV *keysv) {
+#define su_hv_preeminent(H, K) su_hv_preeminent(aTHX_ (H), (K))
+ MAGIC *mg;
+ HV *stash;
+
+ if (!hv) return 0;
+ if (SvCANEXISTDELETE(hv) || mg_find((SV *) hv, PERL_MAGIC_env))
+  return hv_exists_ent(hv, keysv, 0);
+
+ return 1;
+}
+
+STATIC void su_save_helem(pTHX_ HV *hv, SV *keysv, SV **svp, I32 preeminent) {
+#define su_save_helem(H, K, S, P) su_save_helem(aTHX_ (H), (K), (S), (P))
+ if (HvNAME_get(hv) && isGV(*svp)) {
+  save_gp((GV *) *svp, 0);
+  return;
+ }
+ if (preeminent)
+  save_helem(hv, keysv, svp);
+ else {
+  STRLEN keylen;
+  const char * const key = SvPV_const(keysv, keylen);
+  SAVEDELETE(hv, savepvn(key, keylen),
+                 SvUTF8(keysv) ? -(I32)keylen : (I32)keylen);
+ }
+}
+
+/* --- Actions ------------------------------------------------------------- */
 
 typedef struct {
  I32 depth;
@@ -56,6 +169,8 @@ typedef struct {
  if (SU_UD_ORIGIN(U)) Safefree(SU_UD_ORIGIN(U)); \
  Safefree(U); \
 } while (0)
+
+/* ... Reap ................................................................ */
 
 typedef struct {
  su_ud_common ci;
@@ -100,7 +215,7 @@ STATIC void su_call(pTHX_ void *ud_) {
  PUTBACK;
 
  FREETMPS;
- LEAVE; 
+ LEAVE;
 
  SvREFCNT_dec(ud->cb);
  SU_UD_FREE(ud);
@@ -116,47 +231,14 @@ STATIC void su_reap(pTHX_ void *ud) {
                                          PL_scopestack[PL_scopestack_ix]));
 }
 
+/* ... Localize & localize array/hash element .............................. */
+
 typedef struct {
  su_ud_common ci;
  SV *sv;
  SV *val;
  SV *elem;
 } su_ud_localize;
-
-/* Those two functions are courtesy of pp_hot.c:pp_helem */
-
-STATIC I32 su_hv_preeminent(pTHX_ HV *hv, SV *keysv) {
-#define su_hv_preeminent(H, K) su_hv_preeminent(aTHX_ (H), (K))
- MAGIC *mg;
- HV *stash;
- return (!SvRMAGICAL(hv)
-         || mg_find((SV *) hv, PERL_MAGIC_env)
-         || ((mg = mg_find((SV *) hv, PERL_MAGIC_tied))
-                   /* Try to preserve the existenceness of a tied hash
-                    * element by using EXISTS and DELETE if possible.
-                    * Fallback to FETCH and STORE otherwise */
-             && (stash = SvSTASH(SvRV(SvTIED_obj((SV *) hv, mg))))
-             && gv_fetchmethod_autoload(stash, "EXISTS", TRUE)
-             && gv_fetchmethod_autoload(stash, "DELETE", TRUE)
-            )
-        ) ? hv_exists_ent(hv, keysv, 0) : 1;
-}
-
-STATIC void su_save_helem(pTHX_ HV *hv, SV *keysv, SV **svp, I32 preeminent) {
-#define su_save_helem(H, K, S, P) su_save_helem(aTHX_ (H), (K), (S), (P))
- if (HvNAME_get(hv) && isGV(*svp)) {
-  save_gp((GV *) *svp, 0);
-  return;
- }
- if (!preeminent) {
-  STRLEN keylen;
-  const char * const key = SvPV_const(keysv, keylen);
-  SAVEDELETE(hv, savepvn(key, keylen),
-                 SvUTF8(keysv) ? -(I32)keylen : (I32)keylen);
- } else {
-  save_helem(hv, keysv, svp);
- }
-}
 
 STATIC void su_localize(pTHX_ void *ud_) {
 #define su_localize(U) su_localize(aTHX_ (U))
@@ -217,9 +299,10 @@ STATIC void su_localize(pTHX_ void *ud_) {
    if (elem) {
     I32 idx  = SvIV(elem);
     AV *av   = GvAV(gv);
+    I32 preeminent = su_av_preeminent(av, idx);
     SV **svp = av_fetch(av, idx, 1);
     if (!*svp || *svp == &PL_sv_undef) croak(PL_no_aelem, idx);
-    save_aelem(av, idx, svp);
+    su_save_aelem(av, idx, svp, preeminent);
     gv = (GV *) *svp;
     goto maybe_deref;
    } else
@@ -228,7 +311,7 @@ STATIC void su_localize(pTHX_ void *ud_) {
   case SVt_PVHV:
    if (elem) {
     HV *hv   = GvHV(gv);
-    I32 preeminent = hv ? su_hv_preeminent(hv, elem) : 0;
+    I32 preeminent = su_hv_preeminent(hv, elem);
     HE *he   = hv_fetch_ent(hv, elem, 1, 0);
     SV **svp = he ? &HeVAL(he) : NULL;
     if (!svp || *svp == &PL_sv_undef) croak("Modification of non-creatable hash value attempted, subscript \"%s\"", SvPV_nolen_const(*svp));
@@ -265,6 +348,8 @@ assign:
  SvREFCNT_dec(ud->sv);
  SU_UD_FREE(ud);
 }
+
+/* --- Pop a context back -------------------------------------------------- */
 
 #if SU_DEBUG
 # ifdef DEBUGGING
@@ -308,6 +393,8 @@ STATIC void su_pop(pTHX_ void *ud) {
   SU_UD_HANDLER(ud)(aTHX_ ud);
  }
 }
+
+/* --- Initialize the stack and the action userdata ------------------------ */
 
 STATIC I32 su_init(pTHX_ I32 level, void *ud, I32 size) {
 #define su_init(L, U, S) su_init(aTHX_ (L), (U), (S))

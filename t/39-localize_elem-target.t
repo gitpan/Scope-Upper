@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 14;
+use Test::More tests => 17;
 
 use Scope::Upper qw/localize_elem/;
 
@@ -26,7 +26,7 @@ our @a;
   localize_elem '@main::a', 4, 8, 0;
   is_deeply \@a, [ 4 .. 6, undef, 8 ], 'localize_elem "@a", 4, 8, 0 [ok]';
  }
- is_deeply \@a, [ 4 .. 6, undef, undef ], 'localize_elem "@a", 4, 8, 0 [end]';
+ is_deeply \@a, [ 4 .. 6 ], 'localize_elem "@a", 4, 8, 0 [end]';
 }
 
 {
@@ -40,6 +40,19 @@ our @a;
   is_deeply \@a, [ 5, 12, 7 ], 'localize_elem "@a", 1, 12, 1 [ok]';
  }
  is_deeply \@a, [ 4 .. 6 ], 'localize_elem "@a", 1, 12, 1 [end]';
+}
+
+{
+ local @a = (4 .. 6);
+ {
+  local @a = (5 .. 7);
+  {
+   localize_elem '@main::a', 4, 12, 1;
+   is_deeply \@a, [ 5 .. 7 ], 'localize_elem "@a", 4, 12, 1 [not yet]';
+  }
+  is_deeply \@a, [ 5 .. 7, undef, 12 ], 'localize_elem "@a", 4, 12, 1 [ok]';
+ }
+ is_deeply \@a, [ 4 .. 6 ], 'localize_elem "@a", 4, 12, 1 [end]';
 }
 
 # Hashes
