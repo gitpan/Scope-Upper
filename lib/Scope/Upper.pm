@@ -9,20 +9,20 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.02
+Version 0.03
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.02';
+ $VERSION = '0.03';
 }
 
 =head1 SYNOPSIS
 
     package X;
 
-    use Scope::Upper qw/reap localize localize_elem/;
+    use Scope::Upper qw/reap localize localize_elem localize_delete/;
 
     sub desc { shift->{desc} }
 
@@ -43,13 +43,15 @@ BEGIN {
       my $x = do { no strict 'refs'; ${$pkg.'::x'} }; # Get the $x in the scope
       CORE::warn($x->desc . ': ' . join('', @_));
      } => 1;
+
+     localize_delete '@ARGV', $#ARGV => 1; # delete last @ARGV element
     }
 
     package Y;
 
     {
      X::set_tag('pie');
-     # $x is now a X object
+     # $x is now a X object, and @ARGV has one element less
      warn 'what'; # warns "pie: what at ..."
      ...
     } # "pie: done" is printed
@@ -57,7 +59,7 @@ BEGIN {
 =head1 DESCRIPTION
 
 This module lets you defer actions that will take place when the control flow returns into an upper scope.
-Currently, you can hook an upper scope end, or localize variables and array/hash values in higher contexts.
+Currently, you can hook an upper scope end, or localize variables, array/hash values or deletions of elements in higher contexts.
 
 =head1 FUNCTIONS
 
@@ -111,13 +113,36 @@ Similar to L</localize> but for array and hash elements.
 If C<$what> is a glob, the slot to fill is determined from which type of reference C<$value> is ; otherwise it's inferred from the sigil.
 C<$key> is either an array index or a hash key, depending of which kind of variable you localize.
 
+=head2 C<localize_delete $what, $key, $level>
+
+Similiar to L</localize>, but for deleting variables or array/hash elements.
+C<$what> can be:
+
+=over 4
+
+=item *
+
+A glob, in which case C<$key> is ignored and the call is equivalent to C<local *x>.
+
+=item *
+
+A string beginning with C<'@'> or C<'%'>, for which the call is equivalent to respectiveley C<local $a[$key]; delete $a[$key]> and C<local $h{$key}; delete $h{$key}>.
+
+=item *
+
+A string beginning with C<'&'>, which more or less does C<undef &func> in the upper scope.
+It's actually more powerful, as C<&func> won't even C<exists> anymore.
+C<$key> is ignored.
+
+=back
+
 =head2 C<TOPLEVEL>
 
 Returns the level that currently represents the highest scope.
 
 =head1 EXPORT
 
-The functions L</reap>, L</localize>, L</localize_elem> and L</TOPLEVEL> are only exported on request, either individually or by the tags C<':funcs'> and C<':all'>.
+The functions L</reap>, L</localize>, L</localize_elem>, L</localize_delete> and L</TOPLEVEL> are only exported on request, either individually or by the tags C<':funcs'> and C<':all'>.
 
 =cut
 
@@ -125,7 +150,7 @@ use base qw/Exporter/;
 
 our @EXPORT      = ();
 our %EXPORT_TAGS = (
- funcs => [ qw/reap localize localize_elem TOPLEVEL/ ],
+ funcs => [ qw/reap localize localize_elem localize_delete TOPLEVEL/ ],
 );
 our @EXPORT_OK   = map { @$_ } values %EXPORT_TAGS;
 $EXPORT_TAGS{'all'} = [ @EXPORT_OK ];
@@ -187,7 +212,7 @@ Inspired by Ricardo Signes.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2008 Vincent Pit, all rights reserved.
+Copyright 2008-2009 Vincent Pit, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 

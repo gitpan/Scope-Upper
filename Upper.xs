@@ -54,6 +54,10 @@
 # define PERL_MAGIC_env 'E'
 #endif
 
+#ifndef NEGATIVE_INDICES_VAR
+# define NEGATIVE_INDICES_VAR "NEGATIVE_INDICES"
+#endif
+
 #define SU_HAS_PERL(R, V, S) (PERL_REVISION > (R) || (PERL_REVISION == (R) && (PERL_VERSION > (V) || (PERL_VERSION == (V) && (PERL_SUBVERSION >= (S))))))
 
 /* --- Stack manipulations ------------------------------------------------- */
@@ -71,41 +75,58 @@
 
 /* ... Saving array elements ............................................... */
 
-STATIC I32 su_av_preeminent(pTHX_ AV *av, I32 key) {
-#define su_av_preeminent(A, K) su_av_preeminent(aTHX_ (A), (K))
- MAGIC *mg;
- HV *stash;
+STATIC I32 su_av_key2idx(pTHX_ AV *av, I32 key) {
+#define su_av_key2idx(A, K) su_av_key2idx(aTHX_ (A), (K))
+ I32 idx;
 
- if (!av) return 0;
- if (SvCANEXISTDELETE(av))
-  return av_exists(av, key);
+ if (key >= 0)
+  return key;
 
- return 1;
+/* Added by MJD in perl-5.8.1 with 6f12eb6d2a1dfaf441504d869b27d2e40ef4966a */
+#if SU_HAS_PERL(5, 8, 1)
+ if (SvRMAGICAL(av)) {
+  const MAGIC * const tied_magic = mg_find((SV *) av, PERL_MAGIC_tied);
+  if (tied_magic) {
+   int adjust_index = 1;
+   SV * const * const negative_indices_glob =
+                    hv_fetch(SvSTASH(SvRV(SvTIED_obj((SV *) (av), tied_magic))),
+                             NEGATIVE_INDICES_VAR, 16, 0);
+   if (negative_indices_glob && SvTRUE(GvSV(*negative_indices_glob)))
+    return key;
+  }
+ }
+#endif
+
+ idx = key + av_len(av) + 1;
+ if (idx < 0)
+  return key;
+
+ return idx;
 }
 
 #ifndef SAVEADELETE
 
 typedef struct {
  AV *av;
- I32 key;
+ I32 idx;
 } su_ud_adelete;
 
 STATIC void su_adelete(pTHX_ void *ud_) {
  su_ud_adelete *ud = ud_;
 
- av_delete(ud->av, ud->key, G_DISCARD);
+ av_delete(ud->av, ud->idx, G_DISCARD);
  SvREFCNT_dec(ud->av);
 
  Safefree(ud);
 }
 
-STATIC void su_save_adelete(pTHX_ AV *av, I32 key) {
+STATIC void su_save_adelete(pTHX_ AV *av, I32 idx) {
 #define su_save_adelete(A, K) su_save_adelete(aTHX_ (A), (K))
  su_ud_adelete *ud;
 
  Newx(ud, 1, su_ud_adelete);
  ud->av  = av;
- ud->key = key;
+ ud->idx = idx;
  SvREFCNT_inc(av);
 
  SAVEDESTRUCTOR_X(su_adelete, ud);
@@ -115,34 +136,56 @@ STATIC void su_save_adelete(pTHX_ AV *av, I32 key) {
 
 #endif /* SAVEADELETE */
 
-STATIC void su_save_aelem(pTHX_ AV *av, I32 key, SV **svp, I32 preeminent) {
-#define su_save_aelem(A, K, S, P) su_save_aelem(aTHX_ (A), (K), (S), (P))
+STATIC void su_save_aelem(pTHX_ AV *av, SV *key, SV *val) {
+#define su_save_aelem(A, K, V) su_save_aelem(aTHX_ (A), (K), (V))
+ I32 idx;
+ I32 preeminent = 1;
+ SV **svp;
+ HV *stash;
+ MAGIC *mg;
+
+ idx = su_av_key2idx(av, SvIV(key));
+
+ if (SvCANEXISTDELETE(av))
+  preeminent = av_exists(av, idx);
+
+ svp = av_fetch(av, idx, 1);
+ if (!svp || *svp == &PL_sv_undef) croak(PL_no_aelem, idx);
+
  if (preeminent)
-  save_aelem(av, key, svp);
+  save_aelem(av, idx, svp);
  else
-  SAVEADELETE(av, key);
+  SAVEADELETE(av, idx);
+
+ if (val) { /* local $x[$idx] = $val; */
+  SvSetMagicSV(*svp, val);
+ } else {   /* local $x[$idx]; delete $x[$idx]; */
+  av_delete(av, idx, G_DISCARD);
+ }
 }
 
 /* ... Saving hash elements ................................................ */
 
-STATIC I32 su_hv_preeminent(pTHX_ HV *hv, SV *keysv) {
-#define su_hv_preeminent(H, K) su_hv_preeminent(aTHX_ (H), (K))
- MAGIC *mg;
+STATIC void su_save_helem(pTHX_ HV *hv, SV *keysv, SV *val) {
+#define su_save_helem(H, K, V) su_save_helem(aTHX_ (H), (K), (V))
+ I32 preeminent = 1;
+ HE *he;
+ SV **svp;
  HV *stash;
+ MAGIC *mg;
 
- if (!hv) return 0;
  if (SvCANEXISTDELETE(hv) || mg_find((SV *) hv, PERL_MAGIC_env))
-  return hv_exists_ent(hv, keysv, 0);
+  preeminent = hv_exists_ent(hv, keysv, 0);
 
- return 1;
-}
+ he  = hv_fetch_ent(hv, keysv, 1, 0);
+ svp = he ? &HeVAL(he) : NULL;
+ if (!svp || *svp == &PL_sv_undef) croak("Modification of non-creatable hash value attempted, subscript \"%s\"", SvPV_nolen_const(*svp));
 
-STATIC void su_save_helem(pTHX_ HV *hv, SV *keysv, SV **svp, I32 preeminent) {
-#define su_save_helem(H, K, S, P) su_save_helem(aTHX_ (H), (K), (S), (P))
  if (HvNAME_get(hv) && isGV(*svp)) {
   save_gp((GV *) *svp, 0);
   return;
  }
+
  if (preeminent)
   save_helem(hv, keysv, svp);
  else {
@@ -150,6 +193,12 @@ STATIC void su_save_helem(pTHX_ HV *hv, SV *keysv, SV **svp, I32 preeminent) {
   const char * const key = SvPV_const(keysv, keylen);
   SAVEDELETE(hv, savepvn(key, keylen),
                  SvUTF8(keysv) ? -(I32)keylen : (I32)keylen);
+ }
+
+ if (val) { /* local $x{$keysv} = $val; */
+  SvSetMagicSV(*svp, val);
+ } else {   /* local $x{$keysv}; delete $x{$keysv}; */
+  hv_delete_ent(hv, keysv, G_DISCARD, HeHASH(he));
  }
 }
 
@@ -165,10 +214,10 @@ typedef struct {
 #define SU_UD_ORIGIN(U)  (((su_ud_common *) (U))->origin)
 #define SU_UD_HANDLER(U) (((su_ud_common *) (U))->handler)
 
-#define SU_UD_FREE(U) do { \
+#define SU_UD_FREE(U) STMT_START { \
  if (SU_UD_ORIGIN(U)) Safefree(SU_UD_ORIGIN(U)); \
  Safefree(U); \
-} while (0)
+} STMT_END
 
 /* ... Reap ................................................................ */
 
@@ -252,10 +301,14 @@ STATIC void su_localize(pTHX_ void *ud_) {
 
  if (SvTYPE(sv) >= SVt_PVGV) {
   gv = (GV *) sv;
-  if (!SvROK(val))
+  if (!val) {               /* local *x; */
+   t = SVt_PVGV;
+  } else if (!SvROK(val)) { /* local *x = $val; */
    goto assign;
-  t = SvTYPE(SvRV(val));
-  deref = 1;
+  } else {                  /* local *x = \$val; */
+   t = SvTYPE(SvRV(val));
+   deref = 1;
+  }
  } else {
   STRLEN len, l;
   const char *p = SvPV_const(sv, len), *s;
@@ -271,16 +324,16 @@ STATIC void su_localize(pTHX_ void *ud_) {
    case '&': t = SVt_PVCV; break;
    case '*': t = SVt_PVGV; break;
   }
-  if (t == SVt_NULL) {
+  if (t != SVt_NULL) {
+   ++s;
+   --l;
+  } else if (val) { /* t == SVt_NULL, type can't be inferred from the sigil */
    if (SvROK(val) && !sv_isobject(val)) {
     t = SvTYPE(SvRV(val));
     deref = 1;
    } else {
     t = SvTYPE(val);
    }
-  } else {
-   ++s;
-   --l;
   }
   gv = gv_fetchpvn_flags(s, l, GV_ADDMULTI, SVt_PVGV);
  }
@@ -297,27 +350,15 @@ STATIC void su_localize(pTHX_ void *ud_) {
  switch (t) {
   case SVt_PVAV:
    if (elem) {
-    I32 idx  = SvIV(elem);
-    AV *av   = GvAV(gv);
-    I32 preeminent = su_av_preeminent(av, idx);
-    SV **svp = av_fetch(av, idx, 1);
-    if (!*svp || *svp == &PL_sv_undef) croak(PL_no_aelem, idx);
-    su_save_aelem(av, idx, svp, preeminent);
-    gv = (GV *) *svp;
-    goto maybe_deref;
+    su_save_aelem(GvAV(gv), elem, val);
+    goto done;
    } else
     save_ary(gv);
    break;
   case SVt_PVHV:
    if (elem) {
-    HV *hv   = GvHV(gv);
-    I32 preeminent = su_hv_preeminent(hv, elem);
-    HE *he   = hv_fetch_ent(hv, elem, 1, 0);
-    SV **svp = he ? &HeVAL(he) : NULL;
-    if (!svp || *svp == &PL_sv_undef) croak("Modification of non-creatable hash value attempted, subscript \"%s\"", SvPV_nolen_const(*svp));
-    su_save_helem(hv, elem, svp, preeminent);
-    gv = (GV *) *svp;
-    goto maybe_deref;
+    su_save_helem(GvHV(gv), elem, val);
+    goto done;
    } else
     save_hash(gv);
    break;
@@ -331,7 +372,7 @@ STATIC void su_localize(pTHX_ void *ud_) {
   default:
    gv = (GV *) save_scalar(gv);
 maybe_deref:
-   if (deref)
+   if (deref) /* val != NULL */
     val = SvRV(val);
    break;
  }
@@ -341,8 +382,10 @@ maybe_deref:
                                          PL_scopestack[PL_scopestack_ix]));
 
 assign:
- SvSetMagicSV((SV *) gv, val);
+ if (val)
+  SvSetMagicSV((SV *) gv, val);
 
+done:
  SvREFCNT_dec(ud->elem);
  SvREFCNT_dec(ud->val);
  SvREFCNT_dec(ud->sv);
@@ -401,6 +444,13 @@ STATIC I32 su_init(pTHX_ I32 level, void *ud, I32 size) {
  I32 i, depth = 0, *origin;
  I32 cur, last, step;
 
+ LEAVE;
+
+ if (level <= 0) {
+  SU_UD_HANDLER(ud)(aTHX_ ud);
+  goto done;
+ }
+
  SU_D(PerlIO_printf(Perl_debug_log, "%p: ### init for level %d\n", ud, level));
 
  for (i = 0; i < level; ++i) {
@@ -447,6 +497,15 @@ STATIC I32 su_init(pTHX_ I32 level, void *ud, I32 size) {
 
  SU_UD_ORIGIN(ud) = origin;
  SU_UD_DEPTH(ud)  = depth;
+
+ SU_D(PerlIO_printf(Perl_debug_log, "%p: set original destructor at %d [%d]\n",
+                                     ud, PL_savestack_ix, depth));
+
+ SAVEDESTRUCTOR_X(su_pop, ud);
+
+done:
+ ENTER;
+
  return depth;
 }
 
@@ -487,15 +546,7 @@ CODE:
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_reap;
  ud->cb = newSVsv(hook);
- LEAVE;
- if (level) {
-  I32 depth = su_init(level, ud, 3);
-  SU_D(PerlIO_printf(Perl_debug_log, "%p: set original destructor at %d [%d]\n",
-                                      ud, PL_savestack_ix, depth));
-  SAVEDESTRUCTOR_X(su_pop, ud);
- } else
-  su_reap(ud);
- ENTER;
+ su_init(level, ud, 3);
 
 void
 localize(SV *sv, SV *val, ...)
@@ -512,15 +563,7 @@ CODE:
  ud->sv   = sv;
  ud->val  = newSVsv(val);
  ud->elem = NULL;
- LEAVE;
- if (level) {
-  I32 depth = su_init(level, ud, 3);
-  SU_D(PerlIO_printf(Perl_debug_log, "%p: set original destructor at %d [%d]\n",
-                                      ud, PL_savestack_ix, depth));
-  SAVEDESTRUCTOR_X(su_pop, ud);
- } else
-  su_localize(ud);
- ENTER;
+ su_init(level, ud, 3);
 
 void
 localize_elem(SV *sv, SV *elem, SV *val, ...)
@@ -538,13 +581,22 @@ CODE:
  ud->val  = newSVsv(val);
  SvREFCNT_inc(elem);
  ud->elem = elem;
- LEAVE;
- if (level) {
-  I32 depth = su_init(level, ud, 4);
-  SU_D(PerlIO_printf(Perl_debug_log, "%p: set original destructor at %d [%d]\n",
-                                      ud, PL_savestack_ix, depth));
-  SAVEDESTRUCTOR_X(su_pop, ud);
- } else
-  su_localize(ud);
- ENTER;
+ su_init(level, ud, 4);
 
+void
+localize_delete(SV *sv, SV *elem, ...)
+PROTOTYPE: $$;$
+PREINIT:
+ I32 level = 0;
+ su_ud_localize *ud;
+CODE:
+ SU_GET_LEVEL(2);
+ Newx(ud, 1, su_ud_localize);
+ SU_UD_ORIGIN(ud)  = NULL;
+ SU_UD_HANDLER(ud) = su_localize;
+ SvREFCNT_inc(sv);
+ ud->sv   = sv;
+ ud->val  = NULL;
+ SvREFCNT_inc(elem);
+ ud->elem = elem;
+ su_init(level, ud, 4);
