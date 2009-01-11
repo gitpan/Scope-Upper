@@ -6,11 +6,17 @@
 #include "perl.h" 
 #include "XSUB.h"
 
+#define __PACKAGE__ "Scope::Upper"
+
 #ifndef SU_DEBUG
 # define SU_DEBUG 0
 #endif
 
 /* --- Compatibility ------------------------------------------------------- */
+
+#ifndef PERL_UNUSED_VAR
+# define PERL_UNUSED_VAR(V)
+#endif
 
 #ifndef STMT_START
 # define STMT_START do
@@ -112,7 +118,7 @@ typedef struct {
 } su_ud_adelete;
 
 STATIC void su_adelete(pTHX_ void *ud_) {
- su_ud_adelete *ud = ud_;
+ su_ud_adelete *ud = (su_ud_adelete *) ud_;
 
  av_delete(ud->av, ud->idx, G_DISCARD);
  SvREFCNT_dec(ud->av);
@@ -509,30 +515,247 @@ done:
  return depth;
 }
 
-#define SU_GET_LEVEL(A)  \
- if (items > A) {        \
-  SV *lsv = ST(A);       \
-  if (SvOK(lsv))         \
-   level = SvUV(lsv);    \
-  if (level < 0)         \
-   XSRETURN(0);          \
- }                       \
- if (level > cxstack_ix) \
-  level = cxstack_ix;
+/* --- Unwind stack -------------------------------------------------------- */
+
+typedef struct {
+ I32 cxix;
+ I32 items;
+} su_ud_unwind;
+
+STATIC void su_unwind(pTHX_ void *ud_) {
+ su_ud_unwind *ud = (su_ud_unwind *) ud_;
+ OP fakeop;
+ I32 cxix  = ud->cxix;
+ I32 items = ud->items - 1;
+ I32 gimme, mark;
+
+ gimme = GIMME_V;
+
+ if (cxstack_ix > cxix)
+  dounwind(cxix);
+
+ /* Hide the level */
+ if (items >= 0)
+  PL_stack_sp--;
+
+ mark = PL_markstack[cxstack[cxix].blk_oldmarksp];
+
+ if (gimme == G_SCALAR) {
+  *PL_markstack_ptr = PL_stack_sp - PL_stack_base;
+  PL_stack_sp += items;
+ } else {
+  *PL_markstack_ptr = PL_stack_sp - PL_stack_base - items;
+ }
+
+ SU_D({
+  PerlIO_printf(Perl_debug_log,
+                "%p: cx=%d gimme=%s items=%d sp=%d oldmark=%d mark=%d\n",
+                ud, cxix,
+                gimme == G_VOID ? "void" : gimme == G_ARRAY ? "list" : "scalar",
+                items, PL_stack_sp - PL_stack_base, *PL_markstack_ptr, mark);
+ });
+
+ PL_op = PL_ppaddr[OP_RETURN](aTHX);
+ *PL_markstack_ptr = mark;
+
+ fakeop.op_next = PL_op;
+ PL_op = &fakeop;
+
+ Safefree(ud);
+}
 
 /* --- XS ------------------------------------------------------------------ */
+
+#define SU_GET_LEVEL(A)   \
+ STMT_START {             \
+  if (items > A) {        \
+   SV *lsv = ST(A);       \
+   if (SvOK(lsv))         \
+    level = SvIV(lsv);    \
+   if (level < 0)         \
+    XSRETURN(0);          \
+  }                       \
+  if (level > cxstack_ix) \
+   level = cxstack_ix;    \
+ } STMT_END
+
+#define SU_GET_CONTEXT(A, B) \
+ STMT_START {                \
+  if (items > A) {           \
+   SV *lsv = ST(B);          \
+   if (SvOK(lsv))            \
+    level = SvIV(lsv);       \
+   if (level < 0)            \
+    level = 0;               \
+   else if (level > cxix)    \
+    level = cxix;            \
+  }                          \
+ } STMT_END
+
+#define SU_DOPOPTOCX(t)                    \
+ STMT_START {                              \
+  I32 i, cxix = cxstack_ix, level = 0;     \
+  SU_GET_CONTEXT(0, 0);                    \
+  for (i = cxix - level; i >= 0; --i) {    \
+   if (CxTYPE(&cxstack[i]) == t) {         \
+    ST(0) = sv_2mortal(newSViv(cxix - i)); \
+    XSRETURN(1);                           \
+   }                                       \
+  }                                        \
+  XSRETURN_UNDEF;                          \
+ } STMT_END
+
+XS(XS_Scope__Upper_unwind); /* prototype to pass -Wmissing-prototypes */
+
+XS(XS_Scope__Upper_unwind) {
+#ifdef dVAR
+ dVAR; dXSARGS;
+#else
+ dXSARGS;
+#endif
+ I32 cxix = cxstack_ix, level = 0;
+ su_ud_unwind *ud;
+
+ PERL_UNUSED_VAR(cv); /* -W */
+ PERL_UNUSED_VAR(ax); /* -Wall */
+
+ SU_GET_CONTEXT(0, items - 1);
+ cxix -= level;
+ do {
+  PERL_CONTEXT *cx = cxstack + cxix;
+  switch (CxTYPE(cx)) {
+   case CXt_SUB:
+   case CXt_EVAL:
+   case CXt_FORMAT:
+    /* pp_entersub will try to sanitize the stack - screw that, we're insane */
+    if (GIMME_V == G_SCALAR)
+     PL_stack_sp = PL_stack_base + TOPMARK + 1;
+    Newx(ud, 1, su_ud_unwind);
+    ud->cxix  = cxix;
+    ud->items = items;
+    SAVEDESTRUCTOR_X(su_unwind, ud);
+    return;
+   default:
+    break;
+  }
+ } while (--cxix >= 0);
+ croak("Can't return outside a subroutine");
+}
 
 MODULE = Scope::Upper            PACKAGE = Scope::Upper
 
 PROTOTYPES: ENABLE
 
+BOOT:
+{
+ HV *stash = gv_stashpv(__PACKAGE__, 1);
+ newCONSTSUB(stash, "HERE", newSViv(0));
+ newXSproto("Scope::Upper::unwind", XS_Scope__Upper_unwind, file, NULL);
+}
+
 SV *
-TOPLEVEL()
+TOP()
 PROTOTYPE:
 CODE:
  RETVAL = newSViv(cxstack_ix);
 OUTPUT:
  RETVAL
+
+SV *
+UP(...)
+PROTOTYPE: ;$
+PREINIT:
+ I32 i = 0;
+ I32 cxix = cxstack_ix;
+CODE:
+ if (items)
+  i = SvIV(ST(0));
+ if (++i > cxix)
+  i = cxix;
+ RETVAL = newSViv(i);
+OUTPUT:
+ RETVAL
+
+SV *
+DOWN(...)
+PROTOTYPE: ;$
+PREINIT:
+ I32 i = 0;
+CODE:
+ if (items)
+  i = SvIV(ST(0));
+ if (--i < 0)
+  i = 0;
+ RETVAL = newSViv(i);
+OUTPUT:
+ RETVAL
+
+void
+SUB(...)
+PROTOTYPE: ;$
+PPCODE:
+ SU_DOPOPTOCX(CXt_SUB);
+
+void
+EVAL(...)
+PROTOTYPE: ;$
+PPCODE:
+ SU_DOPOPTOCX(CXt_EVAL);
+
+void
+CALLER(...)
+PROTOTYPE: ;$
+PREINIT:
+ I32 cxix = cxstack_ix, caller = 0, level = 0;
+PPCODE:
+ if (items) {
+  SV *csv = ST(0);
+  if (SvOK(csv))
+   caller = SvIV(csv);
+ }
+ cxix = cxstack_ix;
+ while (cxix > 0) {
+  PERL_CONTEXT *cx = cxstack + cxix--;
+  switch (CxTYPE(cx)) {
+   case CXt_SUB:
+   case CXt_EVAL:
+   case CXt_FORMAT:
+    --caller;
+    if (caller < 0)
+     goto done;
+    break;
+  }
+  ++level;
+ }
+done:
+ ST(0) = sv_2mortal(newSViv(level));
+ XSRETURN(1);
+
+void
+want_at(...)
+PROTOTYPE: ;$
+PREINIT:
+ I32 cxix = cxstack_ix, level = 0;
+PPCODE:
+ SU_GET_CONTEXT(0, 0);
+ cxix -= level;
+ while (cxix > 0) {
+  PERL_CONTEXT *cx = cxstack + cxix--;
+  switch (CxTYPE(cx)) {
+   case CXt_SUB:
+   case CXt_EVAL:
+   case CXt_FORMAT: {
+    I32 gimme = cx->blk_gimme;
+    switch (gimme) {
+     case G_VOID:   XSRETURN_UNDEF; break;
+     case G_SCALAR: XSRETURN_NO;    break;
+     case G_ARRAY:  XSRETURN_YES;   break;
+    }
+    break;
+   }
+  }
+ }
+ XSRETURN_UNDEF;
 
 void
 reap(SV *hook, ...)

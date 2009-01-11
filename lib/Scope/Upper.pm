@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.03
+Version 0.04
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.03';
+ $VERSION = '0.04';
 }
 
 =head1 SYNOPSIS
@@ -55,6 +55,26 @@ BEGIN {
      warn 'what'; # warns "pie: what at ..."
      ...
     } # "pie: done" is printed
+
+    package Z;
+
+    use Scope::Upper qw/unwind want_at :words/;
+
+    sub try (&) {
+     my @result = shift->();
+     my $cx = SUB UP SUB;
+     unwind +(want_at($cx) ? @result : scalar @result) => $cx;
+    }
+
+    ...
+
+    sub zap {
+     try {
+      return @things; # returns to try() and then outside zap()
+     }
+    }
+
+    my @what = zap(); # @what contains @things
 
 =head1 DESCRIPTION
 
@@ -136,13 +156,52 @@ C<$key> is ignored.
 
 =back
 
-=head2 C<TOPLEVEL>
+=head2 C<unwind @values, $level>
+
+Returns C<@values> I<from> the context indicated by C<$level>, i.e. from the subroutine, eval or format just above C<$level>.
+The upper level isn't coerced onto C<@values>, which is hence always evaluated in list context.
+
+=head2 C<want_at $level>
+
+Like C<wantarray>, but for the subroutine/eval/format context just above C<$level>.
+
+=head1 WORDS
+
+=head2 C<TOP>
 
 Returns the level that currently represents the highest scope.
 
+=head2 C<HERE>
+
+The current level - i.e. C<0>.
+
+=head2 C<UP $from>
+
+The level of the scope just above C<$from>.
+
+=head2 C<DOWN $from>
+
+The level of the scope just below C<$from>.
+
+=head2 C<SUB $from>
+
+The level of the closest subroutine context above C<$from>.
+
+=head2 C<EVAL $from>
+
+The level of the closest eval context above C<$from>.
+
+If C<$from> is omitted in any of those functions, the current level is used as the reference level.
+
+=head2 C<CALLER $stack>
+
+The level corresponding to the stack referenced by C<caller $stack>.
+
 =head1 EXPORT
 
-The functions L</reap>, L</localize>, L</localize_elem>, L</localize_delete> and L</TOPLEVEL> are only exported on request, either individually or by the tags C<':funcs'> and C<':all'>.
+The functions L</reap>, L</localize>, L</localize_elem>, L</localize_delete>,  L</unwind> and L</want_at> are only exported on request, either individually or by the tags C<':funcs'> and C<':all'>.
+
+Same goes for the words L</TOP>, L</HERE>, L</UP>, L</DOWN>, L</SUB>, L</EVAL> and L</CALLER> that are only exported on request, individually or by the tags C<':words'> and C<':all'>.
 
 =cut
 
@@ -150,7 +209,8 @@ use base qw/Exporter/;
 
 our @EXPORT      = ();
 our %EXPORT_TAGS = (
- funcs => [ qw/reap localize localize_elem localize_delete TOPLEVEL/ ],
+ funcs => [ qw/reap localize localize_elem localize_delete unwind want_at/ ],
+ words => [ qw/TOP HERE UP DOWN SUB EVAL CALLER/ ],
 );
 our @EXPORT_OK   = map { @$_ } values %EXPORT_TAGS;
 $EXPORT_TAGS{'all'} = [ @EXPORT_OK ];
