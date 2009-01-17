@@ -489,22 +489,22 @@ STATIC void su_pop(pTHX_ void *ud) {
 
 /* --- Initialize the stack and the action userdata ------------------------ */
 
-STATIC I32 su_init(pTHX_ I32 level, void *ud, I32 size) {
+STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
 #define su_init(L, U, S) su_init(aTHX_ (L), (U), (S))
  I32 i, depth = 0, *origin;
  I32 cur, last, step;
 
  LEAVE;
 
- if (level <= 0) {
+ if (cxix >= cxstack_ix) {
   SU_UD_HANDLER(ud)(aTHX_ ud);
   goto done;
  }
 
- SU_D(PerlIO_printf(Perl_debug_log, "%p: ### init for level %d\n", ud, level));
+ SU_D(PerlIO_printf(Perl_debug_log, "%p: ### init for cx %d\n", ud, cxix));
 
- for (i = 0; i < level; ++i) {
-  PERL_CONTEXT *cx = &cxstack[cxstack_ix - i];
+ for (i = cxstack_ix; i > cxix; --i) {
+  PERL_CONTEXT *cx = cxstack + i;
   switch (CxTYPE(cx)) {
 #if SU_HAS_PERL(5, 11, 0)
    case CXt_LOOP_FOR:
@@ -612,43 +612,58 @@ STATIC void su_unwind(pTHX_ void *ud_) {
 
 /* --- XS ------------------------------------------------------------------ */
 
-#define SU_GET_LEVEL(A)   \
- STMT_START {             \
-  if (items > A) {        \
-   SV *lsv = ST(A);       \
-   if (SvOK(lsv))         \
-    level = SvIV(lsv);    \
-   if (level < 0)         \
-    XSRETURN(0);          \
-  }                       \
-  if (level > cxstack_ix) \
-   level = cxstack_ix;    \
+#if SU_HAS_PERL(5, 8, 9)
+# define SU_SKIP_DB_MAX 2
+#else
+# define SU_SKIP_DB_MAX 3
+#endif
+
+/* Skip context sequences of 1 to SU_SKIP_DB_MAX (included) block contexts
+ * followed by a DB sub */
+
+#define SU_SKIP_DB(C) \
+ STMT_START {         \
+  I32 i = 1;          \
+  PERL_CONTEXT *cx = cxstack + (C); \
+  do {                              \
+   if (CxTYPE(cx) == CXt_BLOCK && (C) >= i) { \
+    --cx;                                     \
+    if (CxTYPE(cx) == CXt_SUB && cx->blk_sub.cv == GvCV(PL_DBsub)) { \
+     (C) -= i + 1;                \
+     break;                       \
+    }                             \
+   } else                         \
+    break;                        \
+  } while (++i <= SU_SKIP_DB_MAX); \
  } STMT_END
 
-#define SU_GET_CONTEXT(A, B) \
- STMT_START {                \
-  if (items > A) {           \
-   SV *lsv = ST(B);          \
-   if (SvOK(lsv))            \
-    level = SvIV(lsv);       \
-   if (level < 0)            \
-    level = 0;               \
-   else if (level > cxix)    \
-    level = cxix;            \
-  }                          \
+#define SU_GET_CONTEXT(A, B)   \
+ STMT_START {                  \
+  if (items > A) {             \
+   SV *csv = ST(B);            \
+   if (SvOK(csv))              \
+    cxix = SvIV(csv);          \
+   if (cxix < 0)               \
+    cxix = 0;                  \
+   else if (cxix > cxstack_ix) \
+    cxix = cxstack_ix;         \
+  } else {                     \
+   cxix = cxstack_ix;          \
+   if (PL_DBsub)               \
+    SU_SKIP_DB(cxix);          \
+  }                            \
  } STMT_END
 
-#define SU_DOPOPTOCX(t)                    \
- STMT_START {                              \
-  I32 i, cxix = cxstack_ix, level = 0;     \
-  SU_GET_CONTEXT(0, 0);                    \
-  for (i = cxix - level; i >= 0; --i) {    \
-   if (CxTYPE(&cxstack[i]) == t) {         \
-    ST(0) = sv_2mortal(newSViv(cxix - i)); \
-    XSRETURN(1);                           \
-   }                                       \
-  }                                        \
-  XSRETURN_UNDEF;                          \
+#define SU_GET_LEVEL(A, B) \
+ STMT_START {              \
+  if (items > 0) {         \
+   SV *lsv = ST(B);        \
+   if (SvOK(lsv))          \
+    level = SvIV(lsv);     \
+   if (level < 0)          \
+    level = 0;             \
+  } else                   \
+   level = 0;              \
  } STMT_END
 
 XS(XS_Scope__Upper_unwind); /* prototype to pass -Wmissing-prototypes */
@@ -660,17 +675,18 @@ XS(XS_Scope__Upper_unwind) {
  dXSARGS;
 #endif
  dMY_CXT;
- I32 cxix = cxstack_ix, level = 0;
+ I32 cxix;
 
  PERL_UNUSED_VAR(cv); /* -W */
  PERL_UNUSED_VAR(ax); /* -Wall */
 
  SU_GET_CONTEXT(0, items - 1);
- cxix -= level;
  do {
   PERL_CONTEXT *cx = cxstack + cxix;
   switch (CxTYPE(cx)) {
    case CXt_SUB:
+    if (PL_DBsub && cx->blk_sub.cv == GvCV(PL_DBsub))
+     continue;
    case CXt_EVAL:
    case CXt_FORMAT:
     MY_CXT.cxix  = cxix;
@@ -702,7 +718,7 @@ BOOT:
  HV *stash;
  MY_CXT_INIT;
  stash = gv_stashpv(__PACKAGE__, 1);
- newCONSTSUB(stash, "HERE", newSViv(0));
+ newCONSTSUB(stash, "TOP", newSViv(0));
  newXSproto("Scope::Upper::unwind", XS_Scope__Upper_unwind, file, NULL);
 }
 
@@ -715,10 +731,14 @@ CODE:
 #endif /* SU_THREADSAFE */
 
 SV *
-TOP()
+HERE()
 PROTOTYPE:
+PREINIT:
+ I32 cxix = cxstack_ix;
 CODE:
- RETVAL = newSViv(cxstack_ix);
+ if (PL_DBsub)
+  SU_SKIP_DB(cxix);
+ RETVAL = newSViv(cxix);
 OUTPUT:
  RETVAL
 
@@ -726,80 +746,112 @@ SV *
 UP(...)
 PROTOTYPE: ;$
 PREINIT:
- I32 i = 0;
- I32 cxix = cxstack_ix;
+ I32 cxix;
 CODE:
- if (items)
-  i = SvIV(ST(0));
- if (++i > cxix)
-  i = cxix;
- RETVAL = newSViv(i);
-OUTPUT:
- RETVAL
-
-SV *
-DOWN(...)
-PROTOTYPE: ;$
-PREINIT:
- I32 i = 0;
-CODE:
- if (items)
-  i = SvIV(ST(0));
- if (--i < 0)
-  i = 0;
- RETVAL = newSViv(i);
+ SU_GET_CONTEXT(0, 0);
+ if (--cxix < 0)
+  cxix = 0;
+ if (PL_DBsub)
+  SU_SKIP_DB(cxix);
+ RETVAL = newSViv(cxix);
 OUTPUT:
  RETVAL
 
 void
 SUB(...)
 PROTOTYPE: ;$
+PREINIT:
+ I32 cxix;
 PPCODE:
- SU_DOPOPTOCX(CXt_SUB);
+ SU_GET_CONTEXT(0, 0);
+ for (; cxix >= 0; --cxix) {
+  PERL_CONTEXT *cx = cxstack + cxix;
+  switch (CxTYPE(cx)) {
+   default:
+    continue;
+   case CXt_SUB:
+    if (PL_DBsub && cx->blk_sub.cv == GvCV(PL_DBsub))
+     continue;
+    ST(0) = sv_2mortal(newSViv(cxix));
+    XSRETURN(1);
+  }
+ }
+ XSRETURN_UNDEF;
 
 void
 EVAL(...)
 PROTOTYPE: ;$
+PREINIT:
+ I32 cxix;
 PPCODE:
- SU_DOPOPTOCX(CXt_EVAL);
+ SU_GET_CONTEXT(0, 0);
+ for (; cxix >= 0; --cxix) {
+  PERL_CONTEXT *cx = cxstack + cxix;
+  switch (CxTYPE(cx)) {
+   default:
+    continue;
+   case CXt_EVAL:
+    ST(0) = sv_2mortal(newSViv(cxix));
+    XSRETURN(1);
+  }
+ }
+ XSRETURN_UNDEF;
+
+void
+SCOPE(...)
+PROTOTYPE: ;$
+PREINIT:
+ I32 cxix, level;
+PPCODE:
+ SU_GET_LEVEL(0, 0);
+ cxix = cxstack_ix;
+ if (PL_DBsub) {
+  SU_SKIP_DB(cxix);
+  while (cxix > 0) {
+   if (--level < 0)
+    break;
+   --cxix;
+   SU_SKIP_DB(cxix);
+  }
+ } else {
+  cxix -= level;
+  if (cxix < 0)
+   cxix = 0;
+ }
+ ST(0) = sv_2mortal(newSViv(cxix));
+ XSRETURN(1);
 
 void
 CALLER(...)
 PROTOTYPE: ;$
 PREINIT:
- I32 cxix = cxstack_ix, caller = 0, level = 0;
+ I32 cxix, level;
 PPCODE:
- if (items) {
-  SV *csv = ST(0);
-  if (SvOK(csv))
-   caller = SvIV(csv);
- }
- cxix = cxstack_ix;
- while (cxix > 0) {
-  PERL_CONTEXT *cx = cxstack + cxix--;
+ SU_GET_LEVEL(0, 0);
+ for (cxix = cxstack_ix; cxix > 0; --cxix) {
+  PERL_CONTEXT *cx = cxstack + cxix;
   switch (CxTYPE(cx)) {
    case CXt_SUB:
+    if (PL_DBsub && cx->blk_sub.cv == GvCV(PL_DBsub))
+     continue;
    case CXt_EVAL:
    case CXt_FORMAT:
-    --caller;
-    if (caller < 0)
+    if (--level < 0)
      goto done;
     break;
   }
-  ++level;
  }
 done:
- ST(0) = sv_2mortal(newSViv(level));
+ ST(0) = sv_2mortal(newSViv(cxix));
  XSRETURN(1);
 
 void
 want_at(...)
 PROTOTYPE: ;$
 PREINIT:
- I32 cxix = cxstack_ix, level = 0;
+ I32 cxix;
 PPCODE:
  SU_GET_CONTEXT(0, 0);
- cxix -= level;
  while (cxix > 0) {
   PERL_CONTEXT *cx = cxstack + cxix--;
   switch (CxTYPE(cx)) {
@@ -822,24 +874,24 @@ void
 reap(SV *hook, ...)
 PROTOTYPE: &;$
 PREINIT:
- I32 level = 0;
+ I32 cxix;
  su_ud_reap *ud;
 CODE:
- SU_GET_LEVEL(1);
+ SU_GET_CONTEXT(1, 1);
  Newx(ud, 1, su_ud_reap);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_reap;
  ud->cb = newSVsv(hook);
- su_init(level, ud, 3);
+ su_init(cxix, ud, 3);
 
 void
 localize(SV *sv, SV *val, ...)
 PROTOTYPE: $$;$
 PREINIT:
- I32 level = 0;
+ I32 cxix;
  su_ud_localize *ud;
 CODE:
- SU_GET_LEVEL(2);
+ SU_GET_CONTEXT(2, 2);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
@@ -847,16 +899,16 @@ CODE:
  ud->sv   = sv;
  ud->val  = newSVsv(val);
  ud->elem = NULL;
- su_init(level, ud, 3);
+ su_init(cxix, ud, 3);
 
 void
 localize_elem(SV *sv, SV *elem, SV *val, ...)
 PROTOTYPE: $$$;$
 PREINIT:
- I32 level = 0;
+ I32 cxix;
  su_ud_localize *ud;
 CODE:
- SU_GET_LEVEL(3);
+ SU_GET_CONTEXT(3, 3);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
@@ -865,16 +917,16 @@ CODE:
  ud->val  = newSVsv(val);
  SvREFCNT_inc(elem);
  ud->elem = elem;
- su_init(level, ud, 4);
+ su_init(cxix, ud, 4);
 
 void
 localize_delete(SV *sv, SV *elem, ...)
 PROTOTYPE: $$;$
 PREINIT:
- I32 level = 0;
+ I32 cxix;
  su_ud_localize *ud;
 CODE:
- SU_GET_LEVEL(2);
+ SU_GET_CONTEXT(2, 2);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
@@ -883,4 +935,4 @@ CODE:
  ud->val  = NULL;
  SvREFCNT_inc(elem);
  ud->elem = elem;
- su_init(level, ud, 4);
+ su_init(cxix, ud, 4);
