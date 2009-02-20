@@ -137,7 +137,6 @@ STATIC I32 su_av_key2idx(pTHX_ AV *av, I32 key) {
  if (SvRMAGICAL(av)) {
   const MAGIC * const tied_magic = mg_find((SV *) av, PERL_MAGIC_tied);
   if (tied_magic) {
-   int adjust_index = 1;
    SV * const * const negative_indices_glob =
                     hv_fetch(SvSTASH(SvRV(SvTIED_obj((SV *) (av), tied_magic))),
                              NEGATIVE_INDICES_VAR, 16, 0);
@@ -248,7 +247,7 @@ STATIC void su_save_helem(pTHX_ HV *hv, SV *keysv, SV *val) {
  if (val) { /* local $x{$keysv} = $val; */
   SvSetMagicSV(*svp, val);
  } else {   /* local $x{$keysv}; delete $x{$keysv}; */
-  hv_delete_ent(hv, keysv, G_DISCARD, HeHASH(he));
+  (void)hv_delete_ent(hv, keysv, G_DISCARD, HeHASH(he));
  }
 }
 
@@ -296,11 +295,12 @@ STATIC void su_call(pTHX_ void *ud_) {
   * when the new sub scope will be created in call_sv. */
 
 #if SU_HAS_PERL(5, 10, 0)
- if (dieing)
+ if (dieing) {
   if (cxstack_ix < cxstack_max)
    ++cxstack_ix;
   else
    cxstack_ix = Perl_cxinc(aTHX);
+ }
 #endif
 
  call_sv(ud->cb, G_VOID);
@@ -351,11 +351,9 @@ STATIC void su_localize(pTHX_ void *ud_) {
 
  if (SvTYPE(sv) >= SVt_PVGV) {
   gv = (GV *) sv;
-  if (!val) {               /* local *x; */
+  if (!val || !SvROK(val)) { /* local *x; or local *x = $val; */
    t = SVt_PVGV;
-  } else if (!SvROK(val)) { /* local *x = $val; */
-   goto assign;
-  } else {                  /* local *x = \$val; */
+  } else {                   /* local *x = \$val; */
    t = SvTYPE(SvRV(val));
    deref = 1;
   }
@@ -421,7 +419,6 @@ STATIC void su_localize(pTHX_ void *ud_) {
    break;
   default:
    gv = (GV *) save_scalar(gv);
-maybe_deref:
    if (deref) /* val != NULL */
     val = SvRV(val);
    break;
@@ -431,7 +428,6 @@ maybe_deref:
                                      ud, PL_savestack_ix,
                                          PL_scopestack[PL_scopestack_ix]));
 
-assign:
  if (val)
   SvSetMagicSV((SV *) gv, val);
 
@@ -492,7 +488,6 @@ STATIC void su_pop(pTHX_ void *ud) {
 STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
 #define su_init(L, U, S) su_init(aTHX_ (L), (U), (S))
  I32 i, depth = 0, *origin;
- I32 cur, last, step;
 
  LEAVE;
 
@@ -581,6 +576,8 @@ STATIC void su_unwind(pTHX_ void *ud_) {
  SV **savesp = MY_CXT.savesp;
  I32 mark;
 
+ PERL_UNUSED_VAR(ud_);
+
  if (savesp)
   PL_stack_sp = savesp;
 
@@ -629,11 +626,11 @@ STATIC void su_unwind(pTHX_ void *ud_) {
    if (CxTYPE(cx) == CXt_BLOCK && (C) >= i) { \
     --cx;                                     \
     if (CxTYPE(cx) == CXt_SUB && cx->blk_sub.cv == GvCV(PL_DBsub)) { \
-     (C) -= i + 1;                \
-     break;                       \
-    }                             \
-   } else                         \
-    break;                        \
+     (C) -= i + 1;                 \
+     break;                        \
+    }                              \
+   } else                          \
+    break;                         \
   } while (++i <= SU_SKIP_DB_MAX); \
  } STMT_END
 
@@ -641,13 +638,15 @@ STATIC void su_unwind(pTHX_ void *ud_) {
  STMT_START {                  \
   if (items > A) {             \
    SV *csv = ST(B);            \
-   if (SvOK(csv))              \
-    cxix = SvIV(csv);          \
+   if (!SvOK(csv))             \
+    goto default_cx;           \
+   cxix = SvIV(csv);           \
    if (cxix < 0)               \
     cxix = 0;                  \
    else if (cxix > cxstack_ix) \
     cxix = cxstack_ix;         \
   } else {                     \
+default_cx:                    \
    cxix = cxstack_ix;          \
    if (PL_DBsub)               \
     SU_SKIP_DB(cxix);          \
@@ -656,14 +655,15 @@ STATIC void su_unwind(pTHX_ void *ud_) {
 
 #define SU_GET_LEVEL(A, B) \
  STMT_START {              \
+  level = 0;               \
   if (items > 0) {         \
    SV *lsv = ST(B);        \
-   if (SvOK(lsv))          \
+   if (SvOK(lsv)) {        \
     level = SvIV(lsv);     \
-   if (level < 0)          \
-    level = 0;             \
-  } else                   \
-   level = 0;              \
+    if (level < 0)         \
+     level = 0;            \
+   }                       \
+  }                        \
  } STMT_END
 
 XS(XS_Scope__Upper_unwind); /* prototype to pass -Wmissing-prototypes */
@@ -722,12 +722,15 @@ BOOT:
  newXSproto("Scope::Upper::unwind", XS_Scope__Upper_unwind, file, NULL);
 }
 
+#if SU_THREADSAFE
+
 void
 CLONE(...)
 PROTOTYPE: DISABLE
 CODE:
-#if SU_THREADSAFE
+ PERL_UNUSED_VAR(items);
  MY_CXT_CLONE;
+
 #endif /* SU_THREADSAFE */
 
 SV *

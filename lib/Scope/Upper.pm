@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.06
+Version 0.07
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.06';
+ $VERSION = '0.07';
 }
 
 =head1 SYNOPSIS
@@ -79,20 +79,32 @@ BEGIN {
 
 =head1 DESCRIPTION
 
-This module lets you defer actions that will take place when the control flow returns into an upper scope.
-Currently, you can hook an upper scope end, or localize variables, array/hash values or deletions of elements in higher contexts.
-You can also return to an upper level and know which context was in use then.
+This module lets you defer actions I<at run-time> that will take place when the control flow returns into an upper scope.
+Currently, you can:
+
+=over 4
+
+=item *
+
+hook an upper scope end with L</reap> ;
+
+=item *
+
+localize variables, array/hash values or deletions of elements in higher contexts with respectively L</localize>, L</localize_elem> and L</localize_delete> ;
+
+=item *
+
+return values immediately to an upper level with L</unwind>, and know which context was in use then with L</want_at>.
+
+=back
 
 =head1 FUNCTIONS
 
 In all those functions, C<$context> refers to the target scope.
 
-You have to use one or a combination of L</WORDS> to build the C<$context> to pass to these functions.
+You have to use one or a combination of L</WORDS> to build the C<$context> passed to these functions.
 This is needed in order to ensure that the module still works when your program is ran in the debugger.
-Don't try to use a raw value or things will get messy.
-
-The only thing you can assume is that it is an I<absolute> indicator of the frame.
-This means that you can safely store it at some point and use it when needed, and it will still denote the original scope.
+The only thing you can assume is that it is an I<absolute> indicator of the frame, which means that you can safely store it at some point and use it when needed, and it will still denote the original scope.
 
 =cut
 
@@ -169,7 +181,7 @@ C<$key> is ignored.
 
 =head2 C<unwind @values, $context>
 
-Returns C<@values> I<from> the context pointed by C<$context>, i.e. from the subroutine, eval or format just above C<$context>.
+Returns C<@values> I<from> the context pointed by C<$context>, i.e. from the subroutine, eval or format just above C<$context>, and immediately restart the program flow at this point - thus effectively returning to (or from, depending on how you see it) an upper context.
 
 The upper context isn't coerced onto C<@values>, which is hence always evaluated in list context.
 This means that
@@ -219,10 +231,12 @@ The context of the scope just above C<$from>.
 =head3 C<SUB $from>
 
 The context of the closest subroutine above C<$from>.
+Note that C<$from> is returned if it is already a subroutine context ; hence C<SUB SUB == SUB>.
 
 =head3 C<EVAL $from>
 
 The context of the closest eval above C<$from>.
+Note that C<$from> is returned if it is already an eval context ; hence C<EVAL EVAL == EVAL>.
 
 =head2 Getting a context from a level
 
@@ -237,6 +251,64 @@ The C<$level>-th upper context, regardless of its type.
 
 The context of the C<$level>-th upper subroutine/eval/format.
 It kind of corresponds to the context represented by C<caller $level>, but while e.g. C<caller 0> refers to the caller context, C<CALLER 0> will refer to the top scope in the current context.
+
+=head2 Examples
+
+Where L</reap> fires depending on the C<$cxt> :
+
+    sub {
+     eval {
+      sub {
+       {
+        reap \&cleanup => $cxt;
+        ...
+       }     # $cxt = SCOPE(0), or HERE
+       ...
+      }->(); # $cxt = SCOPE(1), or UP, or SUB, or CALLER, or CALLER(0)
+      ...
+     };      # $cxt = SCOPE(2), or UP UP, or UP SUB, or EVAL, or CALLER(1)
+     ...
+    }->();   # $cxt = SCOPE(3), or SUB UP SUB, or SUB EVAL, or CALLER(2)
+    ...
+
+Where L</localize>, L</localize_elem> and L</localize_delete> act depending on the C<$cxt> :
+
+    sub {
+     eval {
+      sub {
+       {
+        localize '$x' => 1 => $cxt;
+        # $cxt = SCOPE(0), or HERE
+        ...
+       }
+       # $cxt = SCOPE(1), or UP, or SUB, or CALLER, or CALLER(0)
+       ...
+      }->();
+      # $cxt = SCOPE(2), or UP UP, or UP SUB, or EVAL, or CALLER(1)
+      ...
+     };
+     # $cxt = SCOPE(3), or SUB UP SUB, or SUB EVAL, or CALLER(2)
+     ...
+    }->();
+    # $cxt = SCOPE(4), UP SUB UP SUB, or UP SUB EVAL, or UP CALLER(2), or TOP
+    ...
+
+Where L</unwind> and L</want_at> point to depending on the C<$cxt>:
+
+    sub {
+     eval {
+      sub {
+       {
+        unwind @things => $cxt;
+        ...
+       }
+       ...
+      }->(); # $cxt = SCOPE(0 .. 1), or HERE, or UP, or SUB, or CALLER(0)
+      ...
+     };      # $cxt = SCOPE(2), or UP UP, or UP SUB, or EVAL, or CALLER(1)
+     ...
+    }->();   # $cxt = SCOPE(3), or SUB UP SUB, or SUB EVAL, or CALLER(2)
+    ...
 
 =head1 EXPORT
 
@@ -278,11 +350,12 @@ Consider those examples:
 
 The first case is "solved" by moving the C<local> before the C<reap>, and the second by using L</localize> instead of L</reap>.
 
-L</reap>, L</localize> and L</localize_elem> effects can't cross C<BEGIN> blocks, hence calling those functions in C<import> is deemed to be useless.
+The effects of L</reap>, L</localize> and L</localize_elem> can't cross C<BEGIN> blocks, hence calling those functions in C<import> is deemed to be useless.
 This is an hopeless case because C<BEGIN> blocks are executed once while localizing constructs should do their job at each run.
+However, it's possible to hook the end of the current scope compilation with L<B::Hooks::EndOfScope>.
 
 Some rare oddities may still happen when running inside the debugger.
-It may help to use a perl higher than 5.8.9 or 5.10.0, as they contain some context fixes.
+It may help to use a perl higher than 5.8.9 or 5.10.0, as they contain some context-related fixes.
 
 =head1 DEPENDENCIES
 
