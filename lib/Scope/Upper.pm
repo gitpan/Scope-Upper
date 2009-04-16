@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.07
+Version 0.08
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.07';
+ $VERSION = '0.08';
 }
 
 =head1 SYNOPSIS
@@ -72,7 +72,9 @@ BEGIN {
     sub zap {
      try {
       return @things; # returns to try() and then outside zap()
+      # not reached
      }
+     # not reached
     }
 
     my @what = zap(); # @what contains @things
@@ -115,7 +117,7 @@ BEGIN {
 
 =head2 C<reap $callback, $context>
 
-Add a destructor that calls C<$callback> when the upper scope represented by C<$context> ends.
+Add a destructor that calls C<$callback> (in void context) when the upper scope represented by C<$context> ends.
 
 =head2 C<localize $what, $value, $context>
 
@@ -189,6 +191,7 @@ This means that
     my $num = sub {
      my @a = ('a' .. 'z');
      unwind @a => HERE;
+     # not reached
     }->();
 
 will set C<$num> to C<'z'>.
@@ -203,6 +206,7 @@ The previous example can then be "corrected" :
     my $num = sub {
      my @a = ('a' .. 'z');
      unwind +(want_at(HERE) ? @a : scalar @a) => HERE;
+     # not reached
     }->();
 
 will righteously set C<$num> to C<26>.
