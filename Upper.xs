@@ -277,8 +277,10 @@ typedef struct {
 
 STATIC void su_call(pTHX_ void *ud_) {
  su_ud_reap *ud = (su_ud_reap *) ud_;
-#if SU_HAS_PERL(5, 10, 0)
+#if SU_HAS_PERL(5, 9, 5)
+ PERL_CONTEXT saved_cx;
  I32 dieing = PL_op->op_type == OP_DIE;
+ I32 cxix;
 #endif
 
  dSP;
@@ -291,23 +293,24 @@ STATIC void su_call(pTHX_ void *ud_) {
  PUSHMARK(SP);
  PUTBACK;
 
- /* If cxstack_ix isn't incremented there, the eval context will be overwritten
-  * when the new sub scope will be created in call_sv. */
+ /* If the recently popped context isn't saved there, it will be overwritten by
+  * the sub scope from call_sv, although it's still needed in our caller. */
 
-#if SU_HAS_PERL(5, 10, 0)
+#if SU_HAS_PERL(5, 9, 5)
  if (dieing) {
   if (cxstack_ix < cxstack_max)
-   ++cxstack_ix;
+   cxix = cxstack_ix + 1;
   else
-   cxstack_ix = Perl_cxinc(aTHX);
+   cxix = Perl_cxinc(aTHX);
+  saved_cx = cxstack[cxix];
  }
 #endif
 
  call_sv(ud->cb, G_VOID);
 
-#if SU_HAS_PERL(5, 10, 0)
- if (dieing && cxstack_ix > 0)
-  --cxstack_ix;
+#if SU_HAS_PERL(5, 9, 5)
+ if (dieing)
+  cxstack[cxix] = saved_cx;
 #endif
 
  PUTBACK;
@@ -717,7 +720,8 @@ BOOT:
  HV *stash;
  MY_CXT_INIT;
  stash = gv_stashpv(__PACKAGE__, 1);
- newCONSTSUB(stash, "TOP", newSViv(0));
+ newCONSTSUB(stash, "TOP",           newSViv(0));
+ newCONSTSUB(stash, "SU_THREADSAFE", newSVuv(SU_THREADSAFE));
  newXSproto("Scope::Upper::unwind", XS_Scope__Upper_unwind, file, NULL);
 }
 

@@ -1,6 +1,17 @@
+use 5.006;
+
 use strict;
 use warnings;
 use ExtUtils::MakeMaker;
+
+my @DEFINES;
+
+# Threads, Windows and 5.8.x don't seem to be best friends
+if ($^O eq 'MSWin32' && $^V lt v5.9.0) {
+ push @DEFINES, '-DSU_MULTIPLICITY=0';
+}
+
+@DEFINES = (DEFINE => join ' ', @DEFINES) if @DEFINES;
 
 my $dist = 'Scope-Upper';
 
@@ -16,7 +27,7 @@ my %META = (
   bugtracker => "http://rt.cpan.org/NoAuth/ReportBug.html?Queue=$dist",
   homepage   => "http://search.cpan.org/dist/$dist/",
   license    => 'http://dev.perl.org/licenses/',
-  repository => "http://git.profvince.com/?p=perl/modules/$dist.git",
+  repository => "http://git.profvince.com/?p=perl%2Fmodules%2F$dist.git",
  },
 );
 
@@ -27,6 +38,7 @@ WriteMakefile(
     VERSION_FROM     => 'lib/Scope/Upper.pm',
     ABSTRACT_FROM    => 'lib/Scope/Upper.pm',
     PL_FILES         => {},
+    @DEFINES,
     PREREQ_PM        => {
         'Exporter' => 0,
         'XSLoader' => 0,
