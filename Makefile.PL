@@ -15,6 +15,17 @@ if ($^O eq 'MSWin32' && $^V lt v5.9.0) {
 
 my $dist = 'Scope-Upper';
 
+(my $name = $dist) =~ s{-}{::}g;
+
+(my $file = $dist) =~ s{-}{/}g;
+$file = "lib/$file.pm";
+
+my %PREREQ_PM = (
+ 'Exporter' => 0,
+ 'XSLoader' => 0,
+ 'base'     => 0,
+);
+
 my %META = (
  configure_requires => {
   'ExtUtils::MakeMaker' => 0,
@@ -22,7 +33,9 @@ my %META = (
  build_requires => {
   'ExtUtils::MakeMaker' => 0,
   'Test::More'          => 0,
+  %PREREQ_PM,
  },
+ dynamic_config => 1,
  resources => {
   bugtracker => "http://rt.cpan.org/NoAuth/ReportBug.html?Queue=$dist",
   homepage   => "http://search.cpan.org/dist/$dist/",
@@ -32,26 +45,23 @@ my %META = (
 );
 
 WriteMakefile(
-    NAME             => 'Scope::Upper',
-    AUTHOR           => 'Vincent Pit <perl@profvince.com>',
-    LICENSE          => 'perl',
-    VERSION_FROM     => 'lib/Scope/Upper.pm',
-    ABSTRACT_FROM    => 'lib/Scope/Upper.pm',
-    PL_FILES         => {},
-    @DEFINES,
-    PREREQ_PM        => {
-        'Exporter' => 0,
-        'XSLoader' => 0,
-    },
-    MIN_PERL_VERSION => 5.006,
-    META_MERGE       => \%META,
-    dist             => {
-        PREOP    => 'pod2text lib/Scope/Upper.pm > $(DISTVNAME)/README',
-        COMPRESS => 'gzip -9f', SUFFIX => 'gz'
-    },
-    clean            => {
-        FILES => "$dist-* *.gcov *.gcda *.gcno cover_db Debian_CPANTS.txt"
-    },
+ NAME             => $name,
+ AUTHOR           => 'Vincent Pit <perl@profvince.com>',
+ LICENSE          => 'perl',
+ VERSION_FROM     => $file,
+ ABSTRACT_FROM    => $file,
+ PL_FILES         => {},
+ @DEFINES,
+ PREREQ_PM        => \%PREREQ_PM,
+ MIN_PERL_VERSION => 5.006,
+ META_MERGE       => \%META,
+ dist             => {
+  PREOP    => "pod2text $file > \$(DISTVNAME)/README",
+  COMPRESS => 'gzip -9f', SUFFIX => 'gz'
+ },
+ clean            => {
+  FILES => "$dist-* *.gcov *.gcda *.gcno cover_db Debian_CPANTS.txt"
+ },
 );
 
 package MY;
@@ -59,6 +69,6 @@ package MY;
 sub postamble {
  return <<'POSTAMBLE';
 testdeb: all
-	PERL_DL_NONLAZY=1 PERLDB_OPTS="NonStop=1" prove --exec='$(PERL) -d -T -I$(INST_LIB) -I$(INST_ARCHLIB)' $(TEST_FILES)
+	PERL_DL_NONLAZY=1 PERLDB_OPTS="NonStop=1" $(FULLPERLRUN) -MTAP::Harness -e 'TAP::Harness->new({verbosity => q{$(VERBOSE)}, lib => [ q{$(INST_LIB)}, q{$(INST_ARCHLIB)} ], switches => [ q{-d} ]})->runtests(@ARGV)' $(TEST_FILES)
 POSTAMBLE
 }

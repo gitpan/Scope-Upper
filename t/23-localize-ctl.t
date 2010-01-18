@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 44;
+use Test::More tests => 44 + 30;
 
 use Scope::Upper qw/localize UP HERE/;
 
@@ -131,19 +131,19 @@ $y = undef;
     {
      local $x = 3;
      localize '$y' => 1 => UP UP UP UP;
-     is $x, 3,     'die - reap outside eval [not yet 1 - x]';
-     is $y, undef, 'die - reap outside eval [not yet 1 - y]';
+     is $x, 3,     'die - localize outside eval [not yet 1 - x]';
+     is $y, undef, 'die - localize outside eval [not yet 1 - y]';
     }
-    is $x, 2,     'die - reap outside eval [not yet 2 - x]';
-    is $y, undef, 'die - reap outside eval [not yet 2 - y]';
+    is $x, 2,     'die - localize outside eval [not yet 2 - x]';
+    is $y, undef, 'die - localize outside eval [not yet 2 - y]';
     die;
    }
   };
-  is $x, 1,     'die - reap outside eval [not yet 3 - x]';
-  is $y, undef, 'die - reap outside eval [not yet 3 - y]';
+  is $x, 1,     'die - localize outside eval [not yet 3 - x]';
+  is $y, undef, 'die - localize outside eval [not yet 3 - y]';
  } # should trigger here
- is $x, 1, 'die - reap outside eval [ok - x]';
- is $y, 1, 'die - reap outside eval [ok - y]';
+ is $x, 1, 'die - localize outside eval [ok - x]';
+ is $y, 1, 'die - localize outside eval [ok - y]';
 }
 
 $y = undef;
@@ -155,16 +155,16 @@ $y = undef;
    {
     local $x = 3;
     localize '$y' => 1 => UP UP UP;
-    is $x, 3,     'die - reap at eval [not yet 1 - x]';
-    is $y, undef, 'die - reap at eval [not yet 1 - y]';
+    is $x, 3,     'die - localize at eval [not yet 1 - x]';
+    is $y, undef, 'die - localize at eval [not yet 1 - y]';
    }
-   is $x, 2,     'die - reap at eval [not yet 2 - x]';
-   is $y, undef, 'die - reap at eval [not yet 2 - y]';
+   is $x, 2,     'die - localize at eval [not yet 2 - x]';
+   is $y, undef, 'die - localize at eval [not yet 2 - y]';
    die;
   }
  }; # should trigger here
- is $x, 1, 'die - reap at eval [ok - x]';
- is $y, 1, 'die - reap at eval [ok - y]';
+ is $x, 1, 'die - localize at eval [ok - x]';
+ is $y, 1, 'die - localize at eval [ok - y]';
 }
 
 $y = undef;
@@ -176,14 +176,141 @@ $y = undef;
    {
     local $x = 3;
     localize '$y' => 1 => UP UP;
-    is $x, 3,     'die - reap inside eval [not yet 1 - x]';
-    is $y, undef, 'die - reap inside eval [not yet 1 - y]';
+    is $x, 3,     'die - localize inside eval [not yet 1 - x]';
+    is $y, undef, 'die - localize inside eval [not yet 1 - y]';
    }
-   is $x, 2,     'die - reap inside eval [not yet 2 - x]';
-   is $y, undef, 'die - reap inside eval [not yet 2 - y]';
+   is $x, 2,     'die - localize inside eval [not yet 2 - x]';
+   is $y, undef, 'die - localize inside eval [not yet 2 - y]';
    die;
   } # should trigger here
  };
- is $x, 1,     'die - reap inside eval [ok - x]';
- is $y, undef, 'die - reap inside eval [ok - y]';
+ is $x, 1,     'die - localize inside eval [ok - x]';
+ is $y, undef, 'die - localize inside eval [ok - y]';
+}
+
+SKIP:
+{
+ skip 'Perl 5.10 required to test given/when' => 30 if $] < 5.010;
+
+ eval <<' GIVEN_TEST_1';
+  use feature 'switch';
+  local $y;
+  {
+   local $x = 1;
+   given (1) {
+    local $x = 2;
+    when (1) {
+     local $x = 3;
+     localize '$y' => 1 => UP UP;
+     is $x, 3,     'given/when - localize at given [not yet - x]';
+     is $y, undef, 'given/when - localize at given [not yet - y]';
+    }
+    fail 'not reached';
+   }
+   is $x, 1, 'given/when - localize at given [ok - x]';
+   is $y, 1, 'given/when - localize at given [ok - y]';
+  }
+ GIVEN_TEST_1
+ fail $@ if $@;
+
+ eval <<' GIVEN_TEST_2';
+  use feature 'switch';
+  local $y;
+  {
+   local $x = 1;
+   given (1) {
+    local $x = 2;
+    when (1) {
+     local $x = 3;
+     localize '$y' => 1 => UP UP;
+     is $x, 3,     'given/when/continue - localize at given [not yet 1 - x]';
+     is $y, undef, 'given/when/continue - localize at given [not yet 1 - y]';
+     continue;
+    }
+    is $x, 2,     'given/when/continue - localize at given [not yet 2 - x]';
+    is $y, undef, 'given/when/continue - localize at given [not yet 2 - y]';
+   }
+   is $x, 1, 'given/when/continue - localize at given [ok - x]';
+   is $y, 1, 'given/when/continue - localize at given [ok - y]';
+  }
+ GIVEN_TEST_2
+ fail $@ if $@;
+
+ eval <<' GIVEN_TEST_3';
+  use feature 'switch';
+  local $y;
+  {
+   local $x = 1;
+   given (1) {
+    local $x = 2;
+    default {
+     local $x = 3;
+     localize '$y' => 1 => UP UP;
+     is $x, 3,     'given/default - localize at given [not yet - x]';
+     is $y, undef, 'given/default - localize at given [not yet - y]';
+    }
+    fail 'not reached';
+   }
+   is $x, 1, 'given/default - localize at given [ok - x]';
+   is $y, 1, 'given/default - localize at given [ok - y]';
+  }
+ GIVEN_TEST_3
+ fail $@ if $@;
+
+ eval <<' GIVEN_TEST_4';
+  use feature 'switch';
+  local $y;
+  {
+   local $x = 1;
+   given (1) {
+    local $x = 2;
+    default {
+     local $x = 3;
+     localize '$y' => 1 => UP UP;
+     is $x, 3,     'given/default/continue - localize at given [not yet 1 - x]';
+     is $y, undef, 'given/default/continue - localize at given [not yet 1 - y]';
+     continue;
+    }
+    is $x, 2,     'given/default/continue - localize at given [not yet 2 - x]';
+    is $y, undef, 'given/default/continue - localize at given [not yet 2 - y]';
+   }
+   is $x, 1, 'given/default/continue - localize at given [ok - x]';
+   is $y, 1, 'given/default/continue - localize at given [ok - y]';
+  }
+ GIVEN_TEST_4
+ fail $@ if $@;
+
+ eval <<' GIVEN_TEST_5';
+  use feature 'switch';
+  local $y;
+  {
+   local $x = 1;
+   given (1) {
+    local $x = 2;
+    default {
+     local $x = 3;
+     given (2) {
+      local $x = 4;
+      when (2) {
+       local $x = 5;
+       localize '$y' => 1 => UP UP UP;
+       is $x, 5,     'given/default/given/when - localize at default [not yet 1 - x]';
+       is $y, undef, 'given/default/given/when - localize at default [not yet 1 - y]';
+       continue;
+      }
+      is $x, 4,     'given/default/given/when - localize at default [not yet 2 - x]';
+      is $y, undef, 'given/default/given/when - localize at default [not yet 2 - y]';
+     }
+     is $x, 3,     'given/default/given/when - localize at default [not yet 3 - x]';
+     is $y, undef, 'given/default/given/when - localize at default [not yet 3 - y]';
+     continue;
+    }
+    is $x, 2, 'given/default/given/when - localize at default [ok 1 - x]';
+    is $y, 1, 'given/default/given/when - localize at default [ok 1 - y]';
+   }
+   is $x, 1,     'given/default/given/when - localize at default [ok 2 - x]';
+   is $y, undef, 'given/default/given/when - localize at default [ok 2 - y]';
+  }
+ GIVEN_TEST_5
+ fail $@ if $@;
 }

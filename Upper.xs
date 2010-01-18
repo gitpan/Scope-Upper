@@ -44,6 +44,10 @@
 # define SvPV_nolen_const(S) SvPV_nolen(S)
 #endif
 
+#ifndef SvREFCNT_inc_simple_void
+# define SvREFCNT_inc_simple_void(sv) SvREFCNT_inc(sv)
+#endif
+
 #ifndef HvNAME_get
 # define HvNAME_get(H) HvNAME(H)
 #endif
@@ -176,7 +180,7 @@ STATIC void su_save_adelete(pTHX_ AV *av, I32 idx) {
  Newx(ud, 1, su_ud_adelete);
  ud->av  = av;
  ud->idx = idx;
- SvREFCNT_inc(av);
+ SvREFCNT_inc_simple_void(av);
 
  SAVEDESTRUCTOR_X(su_adelete, ud);
 }
@@ -285,8 +289,12 @@ STATIC void su_call(pTHX_ void *ud_) {
 
  dSP;
 
- SU_D(PerlIO_printf(Perl_debug_log, "%p: @@@ call at %d (save is %d)\n",
-                                     ud, PL_scopestack_ix, PL_savestack_ix));
+ SU_D({
+  PerlIO_printf(Perl_debug_log,
+                "%p: @@@ call\n%p: depth=%2d scope_ix=%2d save_ix=%2d\n",
+                 ud, ud, SU_UD_DEPTH(ud), PL_scopestack_ix, PL_savestack_ix);
+ });
+
  ENTER;
  SAVETMPS;
 
@@ -324,35 +332,33 @@ STATIC void su_call(pTHX_ void *ud_) {
 
 STATIC void su_reap(pTHX_ void *ud) {
 #define su_reap(U) su_reap(aTHX_ (U))
- SU_D(PerlIO_printf(Perl_debug_log, "%p: === reap at %d (save is %d)\n",
-                                     ud, PL_scopestack_ix, PL_savestack_ix));
+ SU_D({
+  PerlIO_printf(Perl_debug_log,
+                "%p: === reap\n%p: depth=%2d scope_ix=%2d save_ix=%2d\n",
+                 ud, ud, SU_UD_DEPTH(ud), PL_scopestack_ix, PL_savestack_ix);
+ });
+
  SAVEDESTRUCTOR_X(su_call, ud);
- SU_D(PerlIO_printf(Perl_debug_log, "%p: savestack is now at %d, base at %d\n",
-                                     ud, PL_savestack_ix,
-                                         PL_scopestack[PL_scopestack_ix]));
 }
 
 /* ... Localize & localize array/hash element .............................. */
 
 typedef struct {
  su_ud_common ci;
- SV *sv;
- SV *val;
- SV *elem;
+ SV    *sv;
+ SV    *val;
+ SV    *elem;
+ svtype type;
 } su_ud_localize;
 
-STATIC void su_localize(pTHX_ void *ud_) {
-#define su_localize(U) su_localize(aTHX_ (U))
- su_ud_localize *ud = (su_ud_localize *) ud_;
- SV *sv   = ud->sv;
- SV *val  = ud->val;
- SV *elem = ud->elem;
- GV *gv;
+STATIC void su_ud_localize_init(pTHX_ su_ud_localize *ud, SV *sv, SV *val, SV *elem) {
+#define su_ud_localize_init(UD, S, V, E) su_ud_localize_init(aTHX_ (UD), (S), (V), (E))
  UV deref = 0;
  svtype t = SVt_NULL;
 
+ SvREFCNT_inc_simple_void(sv);
+
  if (SvTYPE(sv) >= SVt_PVGV) {
-  gv = (GV *) sv;
   if (!val || !SvROK(val)) { /* local *x; or local *x = $val; */
    t = SVt_PVGV;
   } else {                   /* local *x = \$val; */
@@ -385,14 +391,55 @@ STATIC void su_localize(pTHX_ void *ud_) {
     t = SvTYPE(val);
    }
   }
-  gv = gv_fetchpvn_flags(s, l, GV_ADDMULTI, SVt_PVGV);
+  SvREFCNT_dec(sv);
+  sv = newSVpvn(s, l);
+ }
+
+ switch (t) {
+  case SVt_PVAV:
+  case SVt_PVHV:
+  case SVt_PVCV:
+  case SVt_PVGV:
+   deref = 0;
+  default:
+   break;
+ }
+ /* When deref is set, val isn't NULL */
+
+ ud->sv   = sv;
+ ud->val  = val ? newSVsv(deref ? SvRV(val) : val) : NULL;
+ ud->elem = SvREFCNT_inc(elem);
+ ud->type = t;
+}
+
+STATIC void su_localize(pTHX_ void *ud_) {
+#define su_localize(U) su_localize(aTHX_ (U))
+ su_ud_localize *ud = (su_ud_localize *) ud_;
+ SV *sv   = ud->sv;
+ SV *val  = ud->val;
+ SV *elem = ud->elem;
+ svtype t = ud->type;
+ GV *gv;
+
+ if (SvTYPE(sv) >= SVt_PVGV) {
+  gv = (GV *) sv;
+ } else {
+#ifdef gv_fetchsv
+  gv = gv_fetchsv(sv, GV_ADDMULTI, SVt_PVGV);
+#else
+  STRLEN len;
+  const char *name = SvPV_const(sv, len);
+  gv = gv_fetchpvn_flags(name, len, GV_ADDMULTI, SVt_PVGV);
+#endif
  }
 
  SU_D({
-  SV *z = newSV_type(t);
-  PerlIO_printf(Perl_debug_log, "%p: === localize a %s at %d (save is %d)\n",
-                                 ud, sv_reftype(z, 0),
-                                     PL_scopestack_ix, PL_savestack_ix);
+  SV *z = newSV(0);
+  SvUPGRADE(z, t);
+  PerlIO_printf(Perl_debug_log, "%p: === localize a %s\n",ud, sv_reftype(z, 0));
+  PerlIO_printf(Perl_debug_log,
+                "%p: depth=%2d scope_ix=%2d save_ix=%2d\n",
+                 ud, SU_UD_DEPTH(ud), PL_scopestack_ix, PL_savestack_ix);
   SvREFCNT_dec(z);
  });
 
@@ -421,14 +468,8 @@ STATIC void su_localize(pTHX_ void *ud_) {
    break;
   default:
    gv = (GV *) save_scalar(gv);
-   if (deref) /* val != NULL */
-    val = SvRV(val);
    break;
  }
-
- SU_D(PerlIO_printf(Perl_debug_log, "%p: savestack is now at %d, base at %d\n",
-                                     ud, PL_savestack_ix,
-                                         PL_scopestack[PL_scopestack_ix]));
 
  if (val)
   SvSetMagicSV((SV *) gv, val);
@@ -455,54 +496,103 @@ STATIC void su_pop(pTHX_ void *ud) {
  I32 depth, base, mark, *origin;
  depth = SU_UD_DEPTH(ud);
 
- SU_D(PerlIO_printf(Perl_debug_log, "%p: --- pop %s at %d from %d to %d [%d]\n",
-                                     ud, SU_CXNAME,
-                                         PL_scopestack_ix, PL_savestack_ix,
-                                         PL_scopestack[PL_scopestack_ix],
-                                         depth));
+ SU_D(
+  PerlIO_printf(Perl_debug_log,
+   "%p: --- pop a %s\n"
+   "%p: leave scope     at depth=%2d scope_ix=%2d cur_top=%2d cur_base=%2d\n",
+    ud, SU_CXNAME,
+    ud, depth, PL_scopestack_ix,PL_savestack_ix,PL_scopestack[PL_scopestack_ix])
+ );
 
  origin = SU_UD_ORIGIN(ud);
  mark   = origin[depth];
  base   = origin[depth - 1];
 
- SU_D(PerlIO_printf(Perl_debug_log, "%p: clean from %d down to %d\n",
-                                     ud, mark, base));
+ SU_D(PerlIO_printf(Perl_debug_log,
+                    "%p: original scope was %*c top=%2d     base=%2d\n",
+                     ud,                24, ' ',    mark,        base));
 
  if (base < mark) {
+  SU_D(PerlIO_printf(Perl_debug_log, "%p: clear leftovers\n", ud));
   PL_savestack_ix = mark;
   leave_scope(base);
  }
  PL_savestack_ix = base;
- if (--depth > 0) {
-  SU_UD_DEPTH(ud) = depth;
-  SU_D(PerlIO_printf(Perl_debug_log, "%p: save new destructor at %d [%d]\n",
-                                      ud, PL_savestack_ix, depth));
+
+ SU_UD_DEPTH(ud) = --depth;
+
+ if (depth > 0) {
+  I32 i = 1;
+
   SAVEDESTRUCTOR_X(su_pop, ud);
-  SU_D(PerlIO_printf(Perl_debug_log, "%p: pop end at at %d [%d]\n",
-                                      ud, PL_savestack_ix, depth));
+
+  /* Skip depths corresponding to scopes for which leave_scope() might not be
+   * called. */
+  while (depth > 1 && PL_scopestack_ix >= i) {
+   I32 j = PL_scopestack[PL_scopestack_ix - i];
+
+   if (j < PL_savestack_ix)
+    break;
+
+   SU_D(PerlIO_printf(Perl_debug_log,
+    "%p: skip scope%*cat depth=%2d scope_ix=%2d new_top=%2d >= cur_base=%2d\n",
+     ud,           6, ' ',   depth, PL_scopestack_ix - i, j, PL_savestack_ix));
+
+   SU_UD_DEPTH(ud) = --depth;
+
+   ++i;
+  }
+
+  SU_D(PerlIO_printf(Perl_debug_log,
+         "%p: set destructor  at depth=%2d scope_ix=%2d save_ix=%2d\n",
+          ud,                        depth, PL_scopestack_ix, PL_savestack_ix));
  } else {
   SU_UD_HANDLER(ud)(aTHX_ ud);
  }
+
+ SU_D(PerlIO_printf(Perl_debug_log,
+                    "%p: --- end pop: cur_top=%2d == cur_base=%2d\n",
+                     ud, PL_savestack_ix, PL_scopestack[PL_scopestack_ix]));
 }
+
+/* --- Global data --------------------------------------------------------- */
+
+#define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
+
+typedef struct {
+ int stack_placeholder;
+ I32 cxix;
+ I32 items;
+ SV  **savesp;
+ OP  fakeop;
+} my_cxt_t;
+
+START_MY_CXT
 
 /* --- Initialize the stack and the action userdata ------------------------ */
 
 STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
 #define su_init(L, U, S) su_init(aTHX_ (L), (U), (S))
- I32 i, depth = 0, *origin;
-
- LEAVE;
-
- if (cxix >= cxstack_ix) {
-  SU_UD_HANDLER(ud)(aTHX_ ud);
-  goto done;
- }
+ I32 i, depth = 1, *origin;
 
  SU_D(PerlIO_printf(Perl_debug_log, "%p: ### init for cx %d\n", ud, cxix));
 
  for (i = cxstack_ix; i > cxix; --i) {
   PERL_CONTEXT *cx = cxstack + i;
   switch (CxTYPE(cx)) {
+#if SU_HAS_PERL(5, 10, 0)
+   case CXt_BLOCK:
+    SU_D(PerlIO_printf(Perl_debug_log, "%p: cx %d is block\n", ud, i));
+    /* Given and when blocks are actually followed by a simple block, so skip
+     * it if needed. */
+    if (cxix > 0) { /* Implies i > 0 */
+     PERL_CONTEXT *next = cx - 1;
+     if (CxTYPE(next) == CXt_GIVEN || CxTYPE(next) == CXt_WHEN)
+      --cxix;
+    }
+    depth++;
+    break;
+#endif
 #if SU_HAS_PERL(5, 11, 0)
    case CXt_LOOP_FOR:
    case CXt_LOOP_PLAIN:
@@ -515,7 +605,7 @@ STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
     depth += 2;
     break;
    default:
-    SU_D(PerlIO_printf(Perl_debug_log, "%p: cx %d is normal\n", ud, i));
+    SU_D(PerlIO_printf(Perl_debug_log, "%p: cx %d is other\n", ud, i));
     depth++;
     break;
   }
@@ -532,42 +622,36 @@ STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
  }
  origin[depth] = PL_savestack_ix;
 
- SU_D({
-  PerlIO_printf(Perl_debug_log, "%p: d=%d s=%d x=%d c=%d o=%d\n", ud,
-                depth, 0, PL_scopestack_ix - 1, PL_savestack_ix, origin[depth]);
-  for (i = depth - 1; i >= 0; --i) {
-   I32 x = PL_scopestack_ix  - depth + i;
-   PerlIO_printf(Perl_debug_log, "%p: d=%d s=%d x=%d c=%d o=%d\n", ud,
-                                  i, depth - i, x, PL_scopestack[x], origin[i]);
-  }
- });
-
  SU_UD_ORIGIN(ud) = origin;
  SU_UD_DEPTH(ud)  = depth;
 
- SU_D(PerlIO_printf(Perl_debug_log, "%p: set original destructor at %d [%d]\n",
-                                     ud, PL_savestack_ix, depth));
+ SU_D(PerlIO_printf(Perl_debug_log,
+        "%p: set original destructor at depth=%2d scope_ix=%2d save_ix=%2d\n",
+         ud,                     depth, PL_scopestack_ix - 1, PL_savestack_ix));
+
+ /* Make sure the first destructor fires by pushing enough fake slots on the
+  * stack. */
+ if (PL_savestack_ix + 3 <= PL_scopestack[PL_scopestack_ix - 1]) {
+  dMY_CXT;
+  do {
+   save_int(&MY_CXT.stack_placeholder);
+  } while (PL_savestack_ix + 3 <= PL_scopestack[PL_scopestack_ix - 1]);
+ }
 
  SAVEDESTRUCTOR_X(su_pop, ud);
 
-done:
- ENTER;
+ SU_D({
+  for (i = 0; i <= depth; ++i) {
+   I32 j = PL_scopestack_ix  - i;
+   PerlIO_printf(Perl_debug_log,
+                 "%p: depth=%2d scope_ix=%2d saved_floor=%2d new_floor=%2d\n",
+                  ud,        i, j, origin[depth - i],
+                                   i == 0 ? PL_savestack_ix : PL_scopestack[j]);
+  }
+ });
 
  return depth;
 }
-
-/* --- Global data --------------------------------------------------------- */
-
-#define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
-
-typedef struct {
- I32 cxix;
- I32 items;
- SV  **savesp;
- OP  fakeop;
-} my_cxt_t;
-
-START_MY_CXT
 
 /* --- Unwind stack -------------------------------------------------------- */
 
@@ -622,18 +706,21 @@ STATIC void su_unwind(pTHX_ void *ud_) {
 
 #define SU_SKIP_DB(C) \
  STMT_START {         \
-  I32 i = 1;          \
-  PERL_CONTEXT *cx = cxstack + (C); \
-  do {                              \
-   if (CxTYPE(cx) == CXt_BLOCK && (C) >= i) { \
-    --cx;                                     \
-    if (CxTYPE(cx) == CXt_SUB && cx->blk_sub.cv == GvCV(PL_DBsub)) { \
-     (C) -= i + 1;                 \
-     break;                        \
-    }                              \
-   } else                          \
-    break;                         \
-  } while (++i <= SU_SKIP_DB_MAX); \
+  I32 skipped = 0;    \
+  PERL_CONTEXT *base = cxstack;      \
+  PERL_CONTEXT *cx   = base + (C);   \
+  while (cx >= base && (C) > skipped && CxTYPE(cx) == CXt_BLOCK) \
+   --cx, ++skipped;                  \
+  if (cx >= base && (C) > skipped) { \
+   switch (CxTYPE(cx)) {  \
+    case CXt_SUB:         \
+     if (skipped <= SU_SKIP_DB_MAX && cx->blk_sub.cv == GvCV(PL_DBsub)) \
+      (C) -= skipped + 1; \
+      break;              \
+    default:              \
+     break;               \
+   }                      \
+  }                       \
  } STMT_END
 
 #define SU_GET_CONTEXT(A, B)   \
@@ -718,10 +805,14 @@ PROTOTYPES: ENABLE
 BOOT:
 {
  HV *stash;
+
  MY_CXT_INIT;
+ MY_CXT.stack_placeholder = 0;
+
  stash = gv_stashpv(__PACKAGE__, 1);
  newCONSTSUB(stash, "TOP",           newSViv(0));
  newCONSTSUB(stash, "SU_THREADSAFE", newSVuv(SU_THREADSAFE));
+
  newXSproto("Scope::Upper::unwind", XS_Scope__Upper_unwind, file, NULL);
 }
 
@@ -897,17 +988,19 @@ localize(SV *sv, SV *val, ...)
 PROTOTYPE: $$;$
 PREINIT:
  I32 cxix;
+ I32 size = 3;
  su_ud_localize *ud;
 CODE:
  SU_GET_CONTEXT(2, 2);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
- SvREFCNT_inc(sv);
- ud->sv   = sv;
- ud->val  = newSVsv(val);
- ud->elem = NULL;
- su_init(cxix, ud, 3);
+ su_ud_localize_init(ud, sv, val, NULL);
+#if !SU_HAS_PERL(5, 8, 9)
+ if (ud->type >= SVt_PVGV)
+  size = 6;
+#endif
+ su_init(cxix, ud, size);
 
 void
 localize_elem(SV *sv, SV *elem, SV *val, ...)
@@ -920,11 +1013,7 @@ CODE:
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
- SvREFCNT_inc(sv);
- ud->sv   = sv;
- ud->val  = newSVsv(val);
- SvREFCNT_inc(elem);
- ud->elem = elem;
+ su_ud_localize_init(ud, sv, val, elem);
  su_init(cxix, ud, 4);
 
 void
@@ -932,15 +1021,16 @@ localize_delete(SV *sv, SV *elem, ...)
 PROTOTYPE: $$;$
 PREINIT:
  I32 cxix;
+ I32 size = 4;
  su_ud_localize *ud;
 CODE:
  SU_GET_CONTEXT(2, 2);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
- SvREFCNT_inc(sv);
- ud->sv   = sv;
- ud->val  = NULL;
- SvREFCNT_inc(elem);
- ud->elem = elem;
- su_init(cxix, ud, 4);
+ su_ud_localize_init(ud, sv, NULL, elem);
+#if !SU_HAS_PERL(5, 8, 9)
+ if (ud->type >= SVt_PVGV)
+  size = 6;
+#endif
+ su_init(cxix, ud, size);

@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.09
+Version 0.10
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.09';
+ $VERSION = '0.10';
 }
 
 =head1 SYNOPSIS
@@ -209,7 +209,7 @@ The previous example can then be "corrected" :
      # not reached
     }->();
 
-will righteously set C<$num> to C<26>.
+will rightfully set C<$num> to C<26>.
 
 =head1 CONSTANTS
 
@@ -378,6 +378,9 @@ L<XSLoader> (standard since perl 5.006).
 
 L<Alias>, L<Hook::Scope>, L<Scope::Guard>, L<Guard>.
 
+L<Continuation::Escape> is a thin wrapper around L<Scope::Upper> that gives you a continuation passing style interface to L</unwind>.
+It's easier to use, but it requires you to have control over the scope where you want to return.
+
 =head1 AUTHOR
 
 Vincent Pit, C<< <perl at profvince.com> >>, L<http://www.profvince.com>.
@@ -404,7 +407,7 @@ Thanks to Shawn M. Moore for motivation.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2008-2009 Vincent Pit, all rights reserved.
+Copyright 2008,2009,2010 Vincent Pit, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 
