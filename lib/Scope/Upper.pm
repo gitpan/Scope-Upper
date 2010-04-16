@@ -9,61 +9,89 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.10
+Version 0.11
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.10';
+ $VERSION = '0.11';
 }
 
 =head1 SYNOPSIS
 
-    package X;
+L</reap>, L</localize>, L</localize_elem>, L</localize_delete> and L</WORDS> :
+
+    package Scope;
 
     use Scope::Upper qw/reap localize localize_elem localize_delete :words/;
 
-    sub desc { shift->{desc} }
+    sub new {
+     my ($class, $name) = @_;
 
-    sub set_tag {
-     my ($desc) = @_;
+     localize '$tag' => bless({ name => $name }, $class) => UP;
 
-     # First localize $x so that it gets destroyed last
-     localize '$x' => bless({ desc => $desc }, __PACKAGE__) => UP; # one scope up
-
-     reap sub {
-      my $pkg = caller;
-      my $x = do { no strict 'refs'; ${$pkg.'::x'} }; # Get the $x in the scope
-      print $x->desc . ": done\n";
-     } => SCOPE 1; # same as UP here
-
-     localize_elem '%SIG', '__WARN__' => sub {
-      my $pkg = caller;
-      my $x = do { no strict 'refs'; ${$pkg.'::x'} }; # Get the $x in the scope
-      CORE::warn($x->desc . ': ' . join('', @_));
-     } => UP CALLER 0; # same as UP here
-
-     # delete last @ARGV element
-     localize_delete '@ARGV', -1 => UP SUB HERE; # same as UP here
+     reap { print Scope->tag->name, ": end\n" } UP;
     }
 
-    package Y;
+    # Get the tag stored in the caller namespace
+    sub tag {
+     my $l   = 0;
+     my $pkg = __PACKAGE__;
+     $pkg    = caller $l++ while $pkg eq __PACKAGE__;
+
+     no strict 'refs';
+     ${$pkg . '::tag'};
+    }
+
+    sub name { shift->{name} }
+
+    # Locally capture warnings and reprint them with the name prefixed
+    sub catch {
+     localize_elem '%SIG', '__WARN__' => sub {
+      print Scope->tag->name, ': ', @_;
+     } => UP;
+    }
+
+    # Locally clear @INC
+    sub private {
+     for (reverse 0 .. $#INC) {
+      # First UP is the for loop, second is the sub boundary
+      localize_delete '@INC', $_ => UP UP;
+     }
+    }
+
+    ...
+
+    package UserLand;
 
     {
-     X::set_tag('pie');
-     # $x is now a X object, and @ARGV has one element less
-     warn 'what'; # warns "pie: what at ..."
-     ...
-    } # "pie: done" is printed
+     Scope->new("top");      # initializes $UserLand::tag
 
-    package Z;
+     {
+      Scope->catch;
+      my $one = 1 + undef;   # prints "top: Use of uninitialized value..."
+
+      {
+       Scope->private;
+       eval { require Cwd };
+       print $@;             # prints "Can't locate Cwd.pm in @INC (@INC contains:) at..."
+      }
+
+      require Cwd;           # loads Cwd.pm
+     }
+
+    }                        # prints "top: done"
+
+L</unwind> and L</want_at> :
+
+    package Try;
 
     use Scope::Upper qw/unwind want_at :words/;
 
     sub try (&) {
      my @result = shift->();
-     my $cx = SUB UP SUB;
+     my $cx = SUB UP; # Point to the sub above this one
      unwind +(want_at($cx) ? @result : scalar @result) => $cx;
     }
 
@@ -71,13 +99,15 @@ BEGIN {
 
     sub zap {
      try {
+      my @things = qw/a b c/;
       return @things; # returns to try() and then outside zap()
       # not reached
-     }
+     };
      # not reached
     }
 
-    my @what = zap(); # @what contains @things
+    my @stuff = zap(); # @stuff contains qw/a b c/
+    my $stuff = zap(); # $stuff contains 3
 
 =head1 DESCRIPTION
 
@@ -117,11 +147,11 @@ BEGIN {
 
 =head2 C<reap $callback, $context>
 
-Add a destructor that calls C<$callback> (in void context) when the upper scope represented by C<$context> ends.
+Adds a destructor that calls C<$callback> (in void context) when the upper scope represented by C<$context> ends.
 
 =head2 C<localize $what, $value, $context>
 
-A C<local> delayed to the time of first return into the upper scope denoted by C<$context>.
+Introduces a C<local> delayed to the time of first return into the upper scope denoted by C<$context>.
 C<$what> can be :
 
 =over 4
@@ -143,24 +173,44 @@ For example,
 will set C<$x> to a reference to the string C<'foo'>.
 Other sigils (C<'@'>, C<'%'>, C<'&'> and C<'*'>) require C<$value> to be a reference of the corresponding type.
 
-When the symbol is given by a string, it is resolved when the actual localization takes place and not when C<localize> is called.
-This means that
+When the symbol is given by a string, it is resolved when the actual localization takes place and not when L</localize> is called.
+Thus, if the symbol name is not qualified, it will refer to the variable in the package where the localization actually takes place and not in the one where the L</localize> call was compiled.
+For example,
 
-    sub tag { localize '$x', $_[0] => UP }
+    {
+     package Scope;
+     sub new { localize '$tag', $_[0] => UP }
+    }
 
-will localize in the caller's namespace.
+    {
+     package Tool;
+     {
+      Scope->new;
+      ...
+     }
+    }
+
+will localize C<$Tool::tag> and not C<$Scope::tag>.
+If you want the other behaviour, you just have to specify C<$what> as a glob or a qualified name.
+
+Note that if C<$what> is a string denoting a variable that wasn't declared beforehand, the relevant slot will be vivified as needed and won't be deleted from the glob when the localization ends.
+This situation never arises with C<local> because it only compiles when the localized variable is already declared.
+Although I believe it shouldn't be a problem as glob slots definedness is pretty much an implementation detail, this behaviour may change in the future if proved harmful.
 
 =back
 
 =head2 C<localize_elem $what, $key, $value, $context>
 
-Similar to L</localize> but for array and hash elements.
-If C<$what> is a glob, the slot to fill is determined from which type of reference C<$value> is ; otherwise it's inferred from the sigil.
+Introduces a C<local $what[$key] = $value> or C<local $what{$key} = $value> delayed to the time of first return into the upper scope denoted by C<$context>.
+Unlike L</localize>, C<$what> must be a string and the type of localization is inferred from its sigil.
+The two only valid types are array and hash ; for anything besides those, L</localize_elem> will throw an exception.
 C<$key> is either an array index or a hash key, depending of which kind of variable you localize.
+
+If C<$what> is a string pointing to an undeclared variable, the variable will be vivified as soon as the localization occurs and emptied when it ends, although it will still exist in its glob.
 
 =head2 C<localize_delete $what, $key, $context>
 
-Similiar to L</localize>, but for deleting variables or array/hash elements.
+Introduces the deletion of a variable or an array/hash element delayed to the time of first return into the upper scope denoted by C<$context>.
 C<$what> can be:
 
 =over 4
@@ -183,7 +233,7 @@ C<$key> is ignored.
 
 =head2 C<unwind @values, $context>
 
-Returns C<@values> I<from> the context pointed by C<$context>, i.e. from the subroutine, eval or format just above C<$context>, and immediately restart the program flow at this point - thus effectively returning to (or from, depending on how you see it) an upper context.
+Returns C<@values> I<from> the context pointed by C<$context>, i.e. from the subroutine, eval or format at or just above C<$context>, and immediately restart the program flow at this point - thus effectively returning to an upper scope.
 
 The upper context isn't coerced onto C<@values>, which is hence always evaluated in list context.
 This means that
@@ -199,7 +249,7 @@ You can use L</want_at> to handle these cases.
 
 =head2 C<want_at $context>
 
-Like C<wantarray>, but for the subroutine/eval/format just above C<$context>.
+Like C<wantarray>, but for the subroutine/eval/format at or just above C<$context>.
 
 The previous example can then be "corrected" :
 
@@ -376,10 +426,14 @@ L<XSLoader> (standard since perl 5.006).
 
 =head1 SEE ALSO
 
+L<perlfunc/local>, L<perlsub/"Temporary Values via local()">.
+
 L<Alias>, L<Hook::Scope>, L<Scope::Guard>, L<Guard>.
 
 L<Continuation::Escape> is a thin wrapper around L<Scope::Upper> that gives you a continuation passing style interface to L</unwind>.
 It's easier to use, but it requires you to have control over the scope where you want to return.
+
+L<Scope::Escape>.
 
 =head1 AUTHOR
 
@@ -389,7 +443,8 @@ You can contact me by mail or on C<irc.perl.org> (vincent).
 
 =head1 BUGS
 
-Please report any bugs or feature requests to C<bug-scope-upper at rt.cpan.org>, or through the web interface at L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Scope-Upper>.  I will be notified, and then you'll automatically be notified of progress on your bug as I make changes.
+Please report any bugs or feature requests to C<bug-scope-upper at rt.cpan.org>, or through the web interface at L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Scope-Upper>.
+I will be notified, and then you'll automatically be notified of progress on your bug as I make changes.
 
 =head1 SUPPORT
 
