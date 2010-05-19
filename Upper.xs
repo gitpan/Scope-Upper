@@ -69,6 +69,7 @@
 #endif
 
 #define SU_HAS_PERL(R, V, S) (PERL_REVISION > (R) || (PERL_REVISION == (R) && (PERL_VERSION > (V) || (PERL_VERSION == (V) && (PERL_SUBVERSION >= (S))))))
+#define SU_HAS_PERL_EXACT(R, V, S) ((PERL_REVISION == (R)) && (PERL_VERSION == (V)) && (PERL_SUBVERSION == (S)))
 
 /* --- Threads and multiplicity -------------------------------------------- */
 
@@ -119,19 +120,55 @@
 #define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
 
 typedef struct {
- int stack_placeholder;
- I32 cxix;
- I32 items;
+ char *stack_placeholder;
+ I32   cxix;
+ I32   items;
  SV  **savesp;
- OP  fakeop;
+ OP    fakeop;
 } my_cxt_t;
 
 START_MY_CXT
 
 /* --- Stack manipulations ------------------------------------------------- */
 
-#define SU_SAVE_DESTRUCTOR_SIZE 3
-#define SU_SAVE_INT_SIZE        3
+#define SU_SAVE_PLACEHOLDER() save_pptr(&MY_CXT.stack_placeholder)
+
+#define SU_SAVE_DESTRUCTOR_SIZE  3
+#define SU_SAVE_PLACEHOLDER_SIZE 3
+
+#define SU_SAVE_SCALAR_SIZE 3
+
+#define SU_SAVE_ARY_SIZE      3
+#define SU_SAVE_AELEM_SIZE    4
+#ifdef SAVEADELETE
+# define SU_SAVE_ADELETE_SIZE 3
+#else
+# define SU_SAVE_ADELETE_SIZE SU_SAVE_DESTRUCTOR_SIZE
+#endif
+#if SU_SAVE_AELEM_SIZE < SU_SAVE_ADELETE_SIZE
+# define SU_SAVE_AELEM_OR_ADELETE_SIZE SU_SAVE_ADELETE_SIZE
+#else
+# define SU_SAVE_AELEM_OR_ADELETE_SIZE SU_SAVE_AELEM_SIZE
+#endif
+
+#define SU_SAVE_HASH_SIZE    3
+#define SU_SAVE_HELEM_SIZE   4
+#define SU_SAVE_HDELETE_SIZE 4
+#if SU_SAVE_HELEM_SIZE < SU_SAVE_HDELETE_SIZE
+# define SU_SAVE_HELEM_OR_HDELETE_SIZE SU_SAVE_HDELETE_SIZE
+#else
+# define SU_SAVE_HELEM_OR_HDELETE_SIZE SU_SAVE_HELEM_SIZE
+#endif
+
+#define SU_SAVE_SPTR_SIZE 3
+
+#if !SU_HAS_PERL(5, 8, 9)
+# define SU_SAVE_GP_SIZE 6
+#elif !SU_HAS_PERL(5, 13, 0) || (SU_RELEASE && SU_HAS_PERL_EXACT(5, 13, 0))
+# define SU_SAVE_GP_SIZE 3
+#else
+# define SU_SAVE_GP_SIZE 4
+#endif
 
 #ifndef SvCANEXISTDELETE
 # define SvCANEXISTDELETE(sv) \
@@ -366,10 +403,18 @@ typedef struct {
  svtype type;
 } su_ud_localize;
 
-STATIC void su_ud_localize_init(pTHX_ su_ud_localize *ud, SV *sv, SV *val, SV *elem) {
+#define SU_UD_LOCALIZE_FREE(U) STMT_START { \
+ SvREFCNT_dec((U)->elem); \
+ SvREFCNT_dec((U)->val);  \
+ SvREFCNT_dec((U)->sv);   \
+ SU_UD_FREE(U);           \
+} STMT_END
+
+STATIC I32 su_ud_localize_init(pTHX_ su_ud_localize *ud, SV *sv, SV *val, SV *elem) {
 #define su_ud_localize_init(UD, S, V, E) su_ud_localize_init(aTHX_ (UD), (S), (V), (E))
  UV deref = 0;
  svtype t = SVt_NULL;
+ I32 size;
 
  SvREFCNT_inc_simple_void(sv);
 
@@ -415,11 +460,25 @@ STATIC void su_ud_localize_init(pTHX_ su_ud_localize *ud, SV *sv, SV *val, SV *e
 
  switch (t) {
   case SVt_PVAV:
-  case SVt_PVHV:
-  case SVt_PVCV:
-  case SVt_PVGV:
+   size  = elem ? SU_SAVE_AELEM_OR_ADELETE_SIZE
+                : SU_SAVE_ARY_SIZE;
    deref = 0;
+   break;
+  case SVt_PVHV:
+   size  = elem ? SU_SAVE_HELEM_OR_HDELETE_SIZE
+                : SU_SAVE_HASH_SIZE;
+   deref = 0;
+   break;
+  case SVt_PVGV:
+   size  = SU_SAVE_GP_SIZE;
+   deref = 0;
+   break;
+  case SVt_PVCV:
+   size  = SU_SAVE_SPTR_SIZE;
+   deref = 0;
+   break;
   default:
+   size = SU_SAVE_SCALAR_SIZE;
    break;
  }
  /* When deref is set, val isn't NULL */
@@ -428,6 +487,8 @@ STATIC void su_ud_localize_init(pTHX_ su_ud_localize *ud, SV *sv, SV *val, SV *e
  ud->val  = val ? newSVsv(deref ? SvRV(val) : val) : NULL;
  ud->elem = SvREFCNT_inc(elem);
  ud->type = t;
+
+ return size;
 }
 
 STATIC void su_localize(pTHX_ void *ud_) {
@@ -493,10 +554,7 @@ STATIC void su_localize(pTHX_ void *ud_) {
   SvSetMagicSV((SV *) gv, val);
 
 done:
- SvREFCNT_dec(ud->elem);
- SvREFCNT_dec(ud->val);
- SvREFCNT_dec(ud->sv);
- SU_UD_FREE(ud);
+ SU_UD_LOCALIZE_FREE(ud);
 }
 
 /* --- Pop a context back -------------------------------------------------- */
@@ -548,7 +606,7 @@ STATIC void su_pop(pTHX_ void *ud) {
     SU_D(PerlIO_printf(Perl_debug_log,
           "%p: push a pad slot at depth=%2d scope_ix=%2d save_ix=%2d\n",
            ud,                       depth, PL_scopestack_ix, PL_savestack_ix));
-    save_int(&MY_CXT.stack_placeholder);
+    SU_SAVE_PLACEHOLDER();
    } while (--pad);
   }
 
@@ -567,8 +625,8 @@ STATIC void su_pop(pTHX_ void *ud) {
 
 /* --- Initialize the stack and the action userdata ------------------------ */
 
-STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
-#define su_init(L, U, S) su_init(aTHX_ (L), (U), (S))
+STATIC I32 su_init(pTHX_ void *ud, I32 cxix, I32 size) {
+#define su_init(U, C, S) su_init(aTHX_ (U), (C), (S))
  I32 i, depth = 1, pad, offset, *origin;
 
  SU_D(PerlIO_printf(Perl_debug_log, "%p: ### init for cx %d\n", ud, cxix));
@@ -577,9 +635,11 @@ STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
   pad = 0;
  else {
   I32 extra = size - SU_SAVE_DESTRUCTOR_SIZE;
-  pad = extra / SU_SAVE_INT_SIZE + ((extra % SU_SAVE_INT_SIZE) ? 1 : 0);
+  pad = extra / SU_SAVE_PLACEHOLDER_SIZE;
+  if (extra % SU_SAVE_PLACEHOLDER_SIZE)
+   ++pad;
  }
- offset = SU_SAVE_DESTRUCTOR_SIZE + SU_SAVE_INT_SIZE * pad;
+ offset = SU_SAVE_DESTRUCTOR_SIZE + SU_SAVE_PLACEHOLDER_SIZE * pad;
 
  SU_D(PerlIO_printf(Perl_debug_log, "%p: size=%d pad=%d offset=%d\n",
                                      ud,    size,   pad,   offset));
@@ -642,7 +702,7 @@ STATIC I32 su_init(pTHX_ I32 cxix, void *ud, I32 size) {
    SU_D(PerlIO_printf(Perl_debug_log,
                   "%p: push a fake slot      at scope_ix=%2d  save_ix=%2d\n",
                    ud,                      PL_scopestack_ix, PL_savestack_ix));
-   save_int(&MY_CXT.stack_placeholder);
+   SU_SAVE_PLACEHOLDER();
   } while (PL_savestack_ix + SU_SAVE_DESTRUCTOR_SIZE
                                         <= PL_scopestack[PL_scopestack_ix - 1]);
  }
@@ -818,7 +878,7 @@ BOOT:
  HV *stash;
 
  MY_CXT_INIT;
- MY_CXT.stack_placeholder = 0;
+ MY_CXT.stack_placeholder = NULL;
 
  stash = gv_stashpv(__PACKAGE__, 1);
  newCONSTSUB(stash, "TOP",           newSViv(0));
@@ -832,11 +892,11 @@ BOOT:
 void
 CLONE(...)
 PROTOTYPE: DISABLE
-CODE:
- PERL_UNUSED_VAR(items);
+PPCODE:
  {
   MY_CXT_CLONE;
  }
+ XSRETURN(0);
 
 #endif /* SU_THREADSAFE */
 
@@ -992,32 +1052,29 @@ CODE:
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_reap;
  ud->cb = newSVsv(hook);
- su_init(cxix, ud, 3);
+ su_init(ud, cxix, SU_SAVE_DESTRUCTOR_SIZE);
 
 void
 localize(SV *sv, SV *val, ...)
 PROTOTYPE: $$;$
 PREINIT:
  I32 cxix;
- I32 size = 3;
+ I32 size;
  su_ud_localize *ud;
 CODE:
  SU_GET_CONTEXT(2, 2);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
- su_ud_localize_init(ud, sv, val, NULL);
-#if !SU_HAS_PERL(5, 8, 9)
- if (ud->type >= SVt_PVGV)
-  size = 6;
-#endif
- su_init(cxix, ud, size);
+ size = su_ud_localize_init(ud, sv, val, NULL);
+ su_init(ud, cxix, size);
 
 void
 localize_elem(SV *sv, SV *elem, SV *val, ...)
 PROTOTYPE: $$$;$
 PREINIT:
  I32 cxix;
+ I32 size;
  su_ud_localize *ud;
 CODE:
  if (SvTYPE(sv) >= SVt_PVGV)
@@ -1026,28 +1083,24 @@ CODE:
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
- su_ud_localize_init(ud, sv, val, elem);
+ size = su_ud_localize_init(ud, sv, val, elem);
  if (ud->type != SVt_PVAV && ud->type != SVt_PVHV) {
-  Safefree(ud);
+  SU_UD_LOCALIZE_FREE(ud);
   croak("Can't localize an element of something that isn't an array or a hash");
  }
- su_init(cxix, ud, 4);
+ su_init(ud, cxix, size);
 
 void
 localize_delete(SV *sv, SV *elem, ...)
 PROTOTYPE: $$;$
 PREINIT:
  I32 cxix;
- I32 size = 4;
+ I32 size;
  su_ud_localize *ud;
 CODE:
  SU_GET_CONTEXT(2, 2);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
- su_ud_localize_init(ud, sv, NULL, elem);
-#if !SU_HAS_PERL(5, 8, 9)
- if (ud->type >= SVt_PVGV)
-  size = 6;
-#endif
- su_init(cxix, ud, size);
+ size = su_ud_localize_init(ud, sv, NULL, elem);
+ su_init(ud, cxix, size);
