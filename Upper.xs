@@ -120,11 +120,12 @@
 #define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
 
 typedef struct {
- char *stack_placeholder;
- I32   cxix;
- I32   items;
- SV  **savesp;
- OP    fakeop;
+ char    *stack_placeholder;
+ I32      cxix;
+ I32      items;
+ SV     **savesp;
+ LISTOP   return_op;
+ OP       proxy_op;
 } my_cxt_t;
 
 START_MY_CXT
@@ -166,8 +167,10 @@ START_MY_CXT
 # define SU_SAVE_GP_SIZE 6
 #elif !SU_HAS_PERL(5, 13, 0) || (SU_RELEASE && SU_HAS_PERL_EXACT(5, 13, 0))
 # define SU_SAVE_GP_SIZE 3
-#else
+#elif !SU_HAS_PERL(5, 13, 8)
 # define SU_SAVE_GP_SIZE 4
+#else
+# define SU_SAVE_GP_SIZE 3
 #endif
 
 #ifndef SvCANEXISTDELETE
@@ -757,11 +760,13 @@ STATIC void su_unwind(pTHX_ void *ud_) {
                 items, PL_stack_sp - PL_stack_base, *PL_markstack_ptr, mark);
  });
 
- PL_op = PL_ppaddr[OP_RETURN](aTHX);
+ PL_op = (OP *) &(MY_CXT.return_op);
+ PL_op = PL_op->op_ppaddr(aTHX);
+
  *PL_markstack_ptr = mark;
 
- MY_CXT.fakeop.op_next = PL_op;
- PL_op = &(MY_CXT.fakeop);
+ MY_CXT.proxy_op.op_next = PL_op;
+ PL_op = &(MY_CXT.proxy_op);
 }
 
 /* --- XS ------------------------------------------------------------------ */
@@ -878,7 +883,17 @@ BOOT:
  HV *stash;
 
  MY_CXT_INIT;
+
  MY_CXT.stack_placeholder = NULL;
+
+ /* NewOp() calls calloc() which just zeroes the memory with memset(). */
+ Zero(&(MY_CXT.return_op), 1, sizeof(MY_CXT.return_op));
+ MY_CXT.return_op.op_type   = OP_RETURN;
+ MY_CXT.return_op.op_ppaddr = PL_ppaddr[OP_RETURN];
+
+ Zero(&(MY_CXT.proxy_op), 1, sizeof(MY_CXT.proxy_op));
+ MY_CXT.proxy_op.op_type   = OP_STUB;
+ MY_CXT.proxy_op.op_ppaddr = NULL;
 
  stash = gv_stashpv(__PACKAGE__, 1);
  newCONSTSUB(stash, "TOP",           newSViv(0));
