@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.13
+Version 0.14
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.13';
+ $VERSION = '0.14';
 }
 
 =head1 SYNOPSIS
@@ -462,7 +462,7 @@ Thanks to Shawn M. Moore for motivation.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2008,2009,2010 Vincent Pit, all rights reserved.
+Copyright 2008,2009,2010,2011 Vincent Pit, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 
