@@ -3,9 +3,9 @@
 use strict;
 use warnings;
 
-use Test::More tests => 61 + 4;
+use Test::More tests => 70 + 4;
 
-use Scope::Upper qw/localize UP HERE/;
+use Scope::Upper qw<localize UP HERE>;
 
 # Scalars
 
@@ -66,7 +66,8 @@ undef *x;
 
 SKIP:
 {
- skip 'Can\'t localize through a reference before 5.8.1' => 2 if $] < 5.008001;
+ skip 'Can\'t localize through a reference before 5.8.1' => 2
+                                                             if "$]" < 5.008001;
  eval q{
   no strict 'refs';
   local ${''} = 9;
@@ -80,7 +81,8 @@ SKIP:
 
 SKIP:
 {
- skip 'Can\'t localize through a reference before 5.8.1' => 2 if $] < 5.008001;
+ skip 'Can\'t localize through a reference before 5.8.1' => 2
+                                                             if "$]" < 5.008001;
  eval q{
   no strict 'refs';
   local ${''} = 10;
@@ -292,6 +294,43 @@ my $xh = { a => 5, c => 7 };
   is foo(), 'z', 'localize *foo, sub { "y" } => UP [replaced]';
  }
  is foo(), 'x', 'localize *foo, sub { "y" } => UP [end]';
+}
+
+sub X::foo { 'X::foo' }
+
+{
+ {
+  {
+   localize 'X::foo', sub { 'X::foo 2' } => UP;
+   is(X->foo, 'X::foo', 'localize "X::foo", sub { "X::foo 2" } => UP [not yet]')
+  }
+  is(X->foo, 'X::foo 2', 'localize "X::foo", sub { "X::foo 2" } => UP [ok]');
+ }
+ is(X->foo, 'X::foo', 'localize "X::foo", sub { "X::foo 2" } => UP [end]');
+}
+
+@Y::ISA = 'X';
+
+{
+ {
+  {
+   localize 'X::foo', sub { 'X::foo 3' } => UP;
+   is(Y->foo, 'X::foo', 'localize "X::foo", sub { "X::foo 3" } => UP [not yet]')
+  }
+  is(Y->foo, 'X::foo 3', 'localize "X::foo", sub { "X::foo 3" } => UP [ok]');
+ }
+ is(Y->foo, 'X::foo', 'localize "X::foo", sub { "X::foo 2" } => UP [end]');
+}
+
+{
+ {
+  {
+   localize 'Y::foo', sub { 'Y::foo' } => UP;
+   is(Y->foo, 'X::foo', 'localize "Y::foo", sub { "Y::foo" } => UP [not yet]');
+  }
+  is(Y->foo, 'Y::foo', 'localize "Y::foo", sub { "Y::foo" } => UP [ok]');
+ }
+ is(Y->foo, 'X::foo', 'localize "Y::foo", sub { "Y::foo" } => UP [end]');
 }
 
 # Invalid

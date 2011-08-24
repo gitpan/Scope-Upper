@@ -5,7 +5,7 @@ use warnings;
 
 use Test::More tests => 41 + 30 + 4 * 7;
 
-use Scope::Upper qw/reap UP HERE/;
+use Scope::Upper qw<reap UP HERE>;
 
 our ($x, $y);
 
@@ -137,7 +137,7 @@ $y = undef;
 
 SKIP:
 {
- skip 'Perl 5.10 required to test given/when' => 30 if $] < 5.010;
+ skip 'Perl 5.10 required to test given/when' => 30 if "$]" < 5.010;
 
  eval <<' GIVEN_TEST_1';
   use feature 'switch';

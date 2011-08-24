@@ -5,7 +5,7 @@ use warnings;
 
 use Test::More tests => 44 + 30;
 
-use Scope::Upper qw/localize UP HERE/;
+use Scope::Upper qw<localize UP HERE>;
 
 our ($x, $y);
 
@@ -190,7 +190,7 @@ $y = undef;
 
 SKIP:
 {
- skip 'Perl 5.10 required to test given/when' => 30 if $] < 5.010;
+ skip 'Perl 5.10 required to test given/when' => 30 if "$]" < 5.010;
 
  eval <<' GIVEN_TEST_1';
   use feature 'switch';
