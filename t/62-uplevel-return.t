@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => (10 + 5 + 4) * 2 + 11;
+use Test::More tests => (13 + 5 + 4) * 2 + 1 + (3 + 3 + 1) + 2 + 4 + 11;
 
 use Scope::Upper qw<uplevel HERE UP>;
 
@@ -16,13 +16,16 @@ sub check (&$$) {
 
  my $exp_out = [ 'A', map("X$_", @$exp_in), 'Z' ];
 
- my @ret = sub {
-  my @ret = &uplevel($code, HERE);
-  is_deeply \@ret, $exp_in, "$desc: inside";
+ my @ret_in;
+ my @ret_out = sub {
+  @ret_in = &uplevel($code, HERE);
+  is_deeply \@ret_in, $exp_in, "$desc: inside";
   @$exp_out;
  }->('dummy');
 
- is_deeply \@ret, $exp_out, "$desc: outside";
+ is_deeply \@ret_out, $exp_out, "$desc: outside";
+
+ @ret_in;
 }
 
 check { return } [ ], 'empty explicit return';
@@ -56,6 +59,38 @@ check { 2 }        [ 2 ], 'one const scalar implicit return';
 check { return 1 .. 5 } [ 1 .. 5 ],  'five const scalar explicit return';
 
 check { 6 .. 10 }       [ 6 .. 10 ], 'five const scalar implicit return';
+
+check { 'a' .. 'z' }    [ 'a' .. 'z' ], '26 const scalar implicit return';
+
+check { [ qw<A B C> ] } [ [ qw<A B C> ] ],'one array reference implicit return';
+
+my $cb = sub { 123 };
+my ($ret) = check { $cb } [ $cb ], 'one anonymous sub implicit return';
+is $ret->(), $cb->(), 'anonymous sub returned by uplevel still works';
+
+for my $run (1 .. 3) {
+ my ($cb) = sub {
+  uplevel {
+   my $id = 123;
+   sub { ++$id };
+  };
+ }->('dummy');
+ is $cb->(), 124, "near closure returned by uplevel still works";
+}
+
+{
+ my $id = 456;
+ for my $run (1 .. 3) {
+  my ($cb) = sub {
+   uplevel {
+    my $step = 2;
+    sub { $id += $step };
+   };
+  }->('dummy');
+  is $cb->(), 456 + 2 * $run, "far closure returned by uplevel still works";
+ }
+ is $id, 456 + 2 * 3, 'captured lexical has the right value at the end';
+}
 
 # Mark
 
@@ -112,6 +147,57 @@ check { 6 .. 10 }       [ 6 .. 10 ], 'five const scalar implicit return';
 
  my @ret  = one('*');
  is_deeply \@ret, [ qw|< ( A B [ { * } ] Z ) >| ], "$desc: outside";
+}
+
+# goto
+
+SKIP: {
+ skip "goto to an uplevel'd stack frame does not work on perl 5\.6"
+                                                           => 2 if "$]" < 5.008;
+
+ {
+  my $desc = 'values returned from goto';
+  local $@;
+  my $cb  = sub { 'hello' };
+  my @ret = eval {
+   'a', sub {
+    'b', sub {
+     'c', &uplevel(sub {
+       'd', (goto $cb), 'w'
+     } => UP), 'x'
+    }->(), 'y'
+   }->(), 'z'
+  };
+  is        $@,    '',                        "$desc: did not croak";
+  is_deeply \@ret, [ qw<a b c hello x y z> ], "$desc: returned values";
+ }
+}
+
+# uplevel() to uplevel()
+
+{
+ my $desc = '\&uplevel as the uplevel() callback';
+ local $@;
+ eval {
+  my @ret = sub {
+   my $cxt = HERE;
+   my @ret = sub {
+    my @ret = sub {
+     # Note that an XS call does not need a context, so after the first uplevel
+     # call UP will point to the scope above the first target.
+     'a', uplevel(\&uplevel => (sub {
+      return qw<x y z>;
+     } => UP) => UP), 'b';
+    }->();
+    is "@ret", 'a x y z b', "$desc: returned from uplevel";
+    return qw<u v w>;
+   }->();
+   is "@ret", 'u v w', "$desc: returned from the first target";
+   return qw<m n>;
+  }->();
+  is "@ret", 'm n', "$desc: returned from the second target";
+ };
+ is $@, '', "$desc: no error";
 }
 
 # Magic

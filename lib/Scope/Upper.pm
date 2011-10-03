@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.16
+Version 0.17
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.16';
+ $VERSION = '0.17';
 }
 
 =head1 SYNOPSIS
@@ -149,7 +149,7 @@ return values immediately to an upper level with L</unwind>, and know which cont
 
 =item *
 
-execute a subroutine in the context of an upper subroutine stack frame with L</uplevel>.
+execute a subroutine in the setting of an upper subroutine stack frame with L</uplevel>.
 
 =back
 
@@ -300,7 +300,7 @@ The code is executed in the context of the C<uplevel> call, and what it returns 
     }
 
     my @inverses = target(1, 2, 4); # @inverses contains (0, 0.5, 0.25)
-    my $count    = target(1, 2, 4); # $target is 3
+    my $count    = target(1, 2, 4); # $count is 3
 
 L<Sub::Uplevel> also implements a pure-Perl version of C<uplevel>.
 Both are identical, with the following caveats :
@@ -310,7 +310,7 @@ Both are identical, with the following caveats :
 =item *
 
 The L<Sub::Uplevel> implementation of C<uplevel> may execute a code reference in the context of B<any> upper stack frame.
-The L<Scope::Upper> version only allows to uplevel to a B<subroutine> stack frame, and will croak if you try to target an C<eval> or a format.
+The L<Scope::Upper> version can only uplevel to a B<subroutine> stack frame, and will croak if you try to target an C<eval> or a format.
 
 =item *
 
@@ -336,7 +336,7 @@ will print "inner block: wut..." with L<Sub::Uplevel> and "outer block: wut..." 
 
 =item *
 
-L<Sub::Uplevel> globally overrides C<CORE::GLOBAL::caller>, while L<Scope::Upper> does not.
+L<Sub::Uplevel> globally overrides the Perl keyword C<caller>, while L<Scope::Upper> does not.
 
 =back
 
@@ -463,7 +463,7 @@ Where L</unwind>, L</want_at> and L</uplevel> point to depending on the C<$cxt>:
     ...
 
     # (*) Note that uplevel() will croak if you pass that scope frame,
-    #     because it can't target eval scopes.
+    #     because it cannot target eval scopes.
 
 =head1 EXPORT
 
@@ -520,6 +520,12 @@ However, it's possible to hook the end of the current scope compilation with L<B
 Some rare oddities may still happen when running inside the debugger.
 It may help to use a perl higher than 5.8.9 or 5.10.0, as they contain some context-related fixes.
 
+Calling C<goto> to replace an L</uplevel>'d code frame does not work when a custom runloop is used or when debugging flags are set with C<perl -D>.
+In those two cases, L</uplevel> will look for a C<goto &sub> statement in its callback and, if there is one, throw an exception before executing the code.
+
+Moreover, in order to handle C<goto> statements properly, L</uplevel> currently has to suffer a run-time overhead proportional to the size of the the callback in every case (with a small ratio), and proportional to the size of B<all> the code executed as the result of the L</uplevel> call (including subroutine calls inside the callback) when a C<goto> statement is found in the L</uplevel> callback.
+Despite this shortcoming, this XS version of L</uplevel> should still run way faster than the pure-Perl version from L<Sub::Uplevel>.
+
 =head1 DEPENDENCIES
 
 L<XSLoader> (standard since perl 5.006).
@@ -530,12 +536,12 @@ L<perlfunc/local>, L<perlsub/"Temporary Values via local()">.
 
 L<Alias>, L<Hook::Scope>, L<Scope::Guard>, L<Guard>.
 
+L<Sub::Uplevel>.
+
 L<Continuation::Escape> is a thin wrapper around L<Scope::Upper> that gives you a continuation passing style interface to L</unwind>.
 It's easier to use, but it requires you to have control over the scope where you want to return.
 
 L<Scope::Escape>.
-
-L<Sub::Uplevel> provides a pure-Perl implementation of L</uplevel>.
 
 =head1 AUTHOR
 

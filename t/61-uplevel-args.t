@@ -3,45 +3,46 @@
 use strict;
 use warnings;
 
-use Test::More tests => 9 + 4 * 7 + 3 + 2 + 6;
+use Test::More tests => 9 + 4 * 7 + 3 + ((5 * 4 * 4) * 3 + 1) + 5 + 3 + 2 + 6;
 
-use Scope::Upper qw<uplevel HERE>;
+use Scope::Upper qw<uplevel HERE UP>;
 
 # Basic
 
 sub {
  uplevel { pass 'no @_: callback' };
- is_deeply \@_, [ 'dummy' ], 'no @_: @_ outside';
+ is "@_", 'dummy', 'no @_: @_ outside';
 }->('dummy');
 
 sub {
- uplevel { is_deeply \@_, [ ], "no arguments, no context" }
+ uplevel { is "@_", '', "no arguments, no context" }
 }->('dummy');
 
 sub {
- uplevel { is_deeply \@_, [ ], "no arguments, with context" } HERE
+ uplevel { is "@_", '', "no arguments, with context" } HERE
 }->('dummy');
 
 sub {
- uplevel { is_deeply \@_, [ 1 ], "one const argument" } 1, HERE
+ uplevel { is "@_", '1', "one const argument" } 1, HERE
 }->('dummy');
 
 my $x = 2;
 sub {
- uplevel { is_deeply \@_, [ 2 ], "one lexical argument" } $x, HERE
+ uplevel { is "@_", '2', "one lexical argument" } $x, HERE
 }->('dummy');
 
 our $y = 3;
 sub {
- uplevel { is_deeply \@_, [ 3 ], "one global argument" } $y, HERE
+ uplevel { is "@_", '3', "one global argument" } $y, HERE
 }->('dummy');
 
 sub {
- uplevel { is_deeply \@_, [ 4, 5 ], "two const arguments" } 4, 5, HERE
+ uplevel { is "@_", '4 5', "two const arguments" } 4, 5, HERE
 }->('dummy');
 
 sub {
- uplevel { is_deeply \@_, [ 1 .. 10 ], "ten const arguments" } 1 .. 10, HERE
+ uplevel { is "@_", '1 2 3 4 5 6 7 8 9 10', "ten const arguments" }
+         1 .. 10 => HERE;
 }->('dummy');
 
 # Reification of @_
@@ -143,6 +144,137 @@ sub {
  }->($s);
  is $s, 'xyz', 'aliasing, two layers 2';
 }->('dummy');
+
+# goto
+
+{
+ my @args = (
+  [ [ ],          [ 'm' ]      ],
+  [ [ 'a' ],      [ ]          ],
+  [ [ 'b' ],      [ 'n' ]      ],
+  [ [ 'c' ],      [ 'o', 'p' ] ],
+  [ [ 'd', 'e' ], [ 'q' ]      ],
+ );
+
+ for my $args (@args) {
+  my ($out, $in) = @$args;
+
+  my @out  = @$out;
+  my @in   = @$in;
+
+  for my $reify_out (0, 1) {
+   for my $reify_in (0, 1) {
+    my $desc;
+
+    my $base_test = sub {
+     if ($reify_in) {
+      is_deeply \@_, $in, "$desc: \@_ inside";
+     } else {
+      is "@_", "@in", "$desc: \@_ inside";
+     }
+    };
+
+    my $goto_test         = sub { goto $base_test };
+    my $uplevel_test      = sub { &uplevel($base_test, @_, HERE) };
+    my $goto_uplevel_test = sub { &uplevel($goto_test, @_, HERE) };
+
+    my @tests = (
+     [ 'goto'                    => sub { goto $base_test }         ],
+     [ 'goto in goto'            => sub { goto $goto_test }         ],
+     [ 'uplevel in goto'         => sub { goto $uplevel_test }      ],
+     [ 'goto in uplevel in goto' => sub { goto $goto_uplevel_test } ],
+    );
+
+    for my $test (@tests) {
+     ($desc, my $cb) = @$test;
+     $desc .= ' (' . @out . ' out, ' . @in . ' in';
+     $desc .= ', reify out' if $reify_out;
+     $desc .= ', reify in'  if $reify_in;
+     $desc .= ')';
+
+     local $@;
+     eval {
+      sub {
+       &uplevel($cb, @in, HERE);
+       if ($reify_out) {
+        is_deeply \@_, $out, "$desc: \@_ outside";
+       } else {
+        is "@_", "@out", "$desc: \@_ outside";
+       }
+      }->(@out);
+     };
+     is $@, '', "$desc: no error";
+    }
+   }
+  }
+ }
+
+ sub {
+  my $s  = 'caesar';
+  my $cb = sub {
+   $_[0] = 'brutus';
+  };
+  sub {
+   uplevel {
+    goto $cb;
+   } $_[0], HERE;
+  }->($s);
+  is $s, 'brutus', 'aliasing and goto';
+ }->('dummy');
+}
+
+# goto XS
+
+{
+ my $desc = 'uplevel() calling goto &uplevel';
+ local $@;
+ eval {
+  sub {
+   my $outer_cxt = HERE;
+   sub {
+    my $inner_cxt = HERE;
+    sub {
+     uplevel {
+      is HERE, $inner_cxt, "$desc: context inside first uplevel";
+      is "@_", '1 2 3',    "$desc: arguments inisde first uplevel";
+      unshift @_, 0;
+      push    @_, 4;
+      unshift @_, sub {
+       is HERE, $outer_cxt,  "$desc: context inside second uplevel";
+       is "@_", '0 1 2 3 4', "$desc: arguments inisde second uplevel";
+      };
+      push @_, UP;
+      goto \&uplevel;
+     } 1 .. 3 => UP;
+    }->();
+   }->();
+  }->();
+ };
+ is $@, '', "$desc: no error";
+}
+
+# uplevel() to uplevel()
+
+{
+ my $desc = '\&uplevel as the uplevel() callback';
+ local $@;
+ eval {
+  sub {
+   my $cxt = HERE;
+   sub {
+    sub {
+     # Note that an XS call does not need a context, so after the first uplevel
+     # call UP will point to the scope above the first target.
+     uplevel(\&uplevel => (sub {
+      is "@_", '1 2 3', "$desc: arguments inisde";
+      is HERE, $cxt,    "$desc: context inside";
+     } => 1 .. 3 => UP) => UP);
+    }->(10 .. 19);
+   }->(sub { die 'wut' } => HERE);
+  }->('dummy');
+ };
+ is $@, '', "$desc: no error";
+}
 
 # Magic
 

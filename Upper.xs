@@ -3,7 +3,7 @@
 
 #define PERL_NO_GET_CONTEXT
 #include "EXTERN.h"
-#include "perl.h" 
+#include "perl.h"
 #include "XSUB.h"
 
 #define __PACKAGE__ "Scope::Upper"
@@ -20,6 +20,22 @@
 
 #ifndef dNOOP
 # define dNOOP
+#endif
+
+#ifndef dVAR
+# define dVAR dNOOP
+#endif
+
+#ifndef MUTABLE_SV
+# define MUTABLE_SV(S) ((SV *) (S))
+#endif
+
+#ifndef MUTABLE_AV
+# define MUTABLE_AV(A) ((AV *) (A))
+#endif
+
+#ifndef MUTABLE_CV
+# define MUTABLE_CV(C) ((CV *) (C))
 #endif
 
 #ifndef PERL_UNUSED_VAR
@@ -55,8 +71,21 @@
 # define SU_POISON(D, N, T) NOOP
 #endif
 
+#ifndef newSV_type
+STATIC SV *su_newSV_type(pTHX_ svtype t) {
+ SV *sv = newSV(0);
+ SvUPGRADE(sv, t);
+ return sv;
+}
+# define newSV_type(T) su_newSV_type(aTHX_ (T))
+#endif
+
 #ifndef SvPV_const
 # define SvPV_const(S, L) SvPV(S, L)
+#endif
+
+#ifndef SvPVX_const
+# define SvPVX_const(S) SvPVX(S)
 #endif
 
 #ifndef SvPV_nolen_const
@@ -64,7 +93,11 @@
 #endif
 
 #ifndef SvREFCNT_inc_simple_void
-# define SvREFCNT_inc_simple_void(sv) SvREFCNT_inc(sv)
+# define SvREFCNT_inc_simple_void(sv) ((void) SvREFCNT_inc(sv))
+#endif
+
+#ifndef mPUSHi
+# define mPUSHi(I) PUSHs(sv_2mortal(newSViv(I)))
 #endif
 
 #ifndef GvCV_set
@@ -73,6 +106,14 @@
 
 #ifndef CvGV_set
 # define CvGV_set(C, G) (CvGV(C) = (G))
+#endif
+
+#ifndef CvSTASH_set
+# define CvSTASH_set(C, S) (CvSTASH(C) = (S))
+#endif
+
+#ifndef CvISXSUB
+# define CvISXSUB(C) CvXSUB(C)
 #endif
 
 #ifndef CxHASARGS
@@ -85,10 +126,6 @@
 
 #ifndef gv_fetchpvn_flags
 # define gv_fetchpvn_flags(A, B, C, D) gv_fetchpv((A), (C), (D))
-#endif
-
-#ifndef cv_clone
-# define cv_clone(P) Perl_cv_clone(aTHX_ (P))
 #endif
 
 #ifndef PERL_MAGIC_tied
@@ -142,25 +179,39 @@
 # define MY_CXT_CLONE NOOP
 #endif
 
-/* --- uplevel() data tokens ----------------------------------------------- */
+/* --- unwind() global storage --------------------------------------------- */
+
+typedef struct {
+ I32      cxix;
+ I32      items;
+ SV     **savesp;
+ LISTOP   return_op;
+ OP       proxy_op;
+} su_unwind_storage;
+
+/* --- uplevel() data tokens and global storage ---------------------------- */
 
 typedef struct {
  void *next;
 
  I32  cxix;
- CV  *target;
  bool died;
+
+ CV  *target;
+ I32  target_depth;
+
+ CV  *callback;
+ CV  *renamed;
 
  PERL_SI *si;
  PERL_SI *old_curstackinfo;
  AV      *old_mainstack;
 
- I32  old_depth;
  COP *old_curcop;
 
- bool old_catch;
- OP  *old_op;
- CV  *cloned_cv;
+ runops_proc_t  old_runops;
+ bool           old_catch;
+ OP            *old_op;
 } su_uplevel_ud;
 
 STATIC su_uplevel_ud *su_uplevel_ud_new(pTHX) {
@@ -175,6 +226,8 @@ STATIC su_uplevel_ud *su_uplevel_ud_new(pTHX) {
  si->si_stack   = newAV();
  AvREAL_off(si->si_stack);
  si->si_cxstack = NULL;
+ si->si_cxmax   = 0;
+
  sud->si = si;
 
  return sud;
@@ -193,6 +246,7 @@ STATIC void su_uplevel_ud_delete(pTHX_ su_uplevel_ud *sud) {
 }
 
 typedef struct {
+ su_uplevel_ud *top;
  su_uplevel_ud *root;
  I32            count;
 } su_uplevel_storage;
@@ -206,15 +260,9 @@ typedef struct {
 #define MY_CXT_KEY __PACKAGE__ "::_guts" XS_VERSION
 
 typedef struct {
- char    *stack_placeholder;
-
- I32      cxix;
- I32      items;
- SV     **savesp;
- LISTOP   return_op;
- OP       proxy_op;
-
- su_uplevel_storage uplevel_storage;
+ char               *stack_placeholder;
+ su_unwind_storage   unwind_storage;
+ su_uplevel_storage  uplevel_storage;
 } my_cxt_t;
 
 START_MY_CXT
@@ -856,9 +904,9 @@ STATIC I32 su_init(pTHX_ void *ud, I32 cxix, I32 size) {
 
 STATIC void su_unwind(pTHX_ void *ud_) {
  dMY_CXT;
- I32 cxix    = MY_CXT.cxix;
- I32 items   = MY_CXT.items - 1;
- SV **savesp = MY_CXT.savesp;
+ I32 cxix    = MY_CXT.unwind_storage.cxix;
+ I32 items   = MY_CXT.unwind_storage.items - 1;
+ SV **savesp = MY_CXT.unwind_storage.savesp;
  I32 mark;
 
  PERL_UNUSED_VAR(ud_);
@@ -885,13 +933,13 @@ STATIC void su_unwind(pTHX_ void *ud_) {
                 items, PL_stack_sp - PL_stack_base, *PL_markstack_ptr, mark);
  });
 
- PL_op = (OP *) &(MY_CXT.return_op);
+ PL_op = (OP *) &(MY_CXT.unwind_storage.return_op);
  PL_op = PL_op->op_ppaddr(aTHX);
 
  *PL_markstack_ptr = mark;
 
- MY_CXT.proxy_op.op_next = PL_op;
- PL_op = &(MY_CXT.proxy_op);
+ MY_CXT.unwind_storage.proxy_op.op_next = PL_op;
+ PL_op = &(MY_CXT.unwind_storage.proxy_op);
 }
 
 /* --- Uplevel ------------------------------------------------------------- */
@@ -915,37 +963,169 @@ STATIC U8 su_op_gimme_reverse(U8 gimme) {
 #define SU_UPLEVEL_SAVE(f, t) STMT_START { sud->old_##f = PL_##f; PL_##f = (t); } STMT_END
 #define SU_UPLEVEL_RESTORE(f) STMT_START { PL_##f = sud->old_##f; } STMT_END
 
-STATIC int su_uplevel_restore_free(pTHX_ SV *sv, MAGIC *mg) {
- su_uplevel_ud_delete((su_uplevel_ud *) mg->mg_ptr);
+STATIC su_uplevel_ud *su_uplevel_storage_new(pTHX) {
+#define su_uplevel_storage_new() su_uplevel_storage_new(aTHX)
+ su_uplevel_ud *sud;
+ dMY_CXT;
+
+ sud = MY_CXT.uplevel_storage.root;
+ if (sud) {
+  MY_CXT.uplevel_storage.root = sud->next;
+  MY_CXT.uplevel_storage.count--;
+ } else {
+  sud = su_uplevel_ud_new();
+ }
+
+ sud->next = MY_CXT.uplevel_storage.top;
+ MY_CXT.uplevel_storage.top = sud;
+
+ return sud;
+}
+
+STATIC void su_uplevel_storage_delete(pTHX_ su_uplevel_ud *sud) {
+#define su_uplevel_storage_delete(S) su_uplevel_storage_delete(aTHX_ (S))
+ dMY_CXT;
+
+ MY_CXT.uplevel_storage.top = sud->next;
+
+ if (MY_CXT.uplevel_storage.count >= SU_UPLEVEL_STORAGE_SIZE) {
+  su_uplevel_ud_delete(sud);
+ } else {
+  sud->next = MY_CXT.uplevel_storage.root;
+  MY_CXT.uplevel_storage.root = sud;
+  MY_CXT.uplevel_storage.count++;
+ }
+}
+
+STATIC int su_uplevel_goto_static(const OP *o) {
+ for (; o; o = o->op_sibling) {
+  /* goto ops are unops with kids. */
+  if (!(o->op_flags & OPf_KIDS))
+   continue;
+
+  switch (o->op_type) {
+   case OP_LEAVEEVAL:
+   case OP_LEAVETRY:
+    /* Don't care about gotos inside eval, as they are forbidden at run time. */
+    break;
+   case OP_GOTO:
+    return 1;
+   default:
+    if (su_uplevel_goto_static(cUNOPo->op_first))
+     return 1;
+    break;
+  }
+ }
 
  return 0;
 }
 
-STATIC MGVTBL su_uplevel_restore_vtbl = {
- 0,
- 0,
- 0,
- 0,
- su_uplevel_restore_free
-};
+STATIC int su_uplevel_goto_runops(pTHX) {
+#define su_uplevel_goto_runops() su_uplevel_goto_runops(aTHX)
+ register OP *op;
+ dVAR;
+
+ op = PL_op;
+ do {
+  if (op->op_type == OP_GOTO) {
+   AV  *argarray = NULL;
+   I32  cxix;
+
+   for (cxix = cxstack_ix; cxix >= 0; --cxix) {
+    const PERL_CONTEXT *cx = cxstack + cxix;
+
+    switch (CxTYPE(cx)) {
+     case CXt_SUB:
+      if (CxHASARGS(cx)) {
+       argarray = cx->blk_sub.argarray;
+       goto done;
+      }
+      break;
+     case CXt_EVAL:
+     case CXt_FORMAT:
+      goto done;
+     default:
+      break;
+    }
+   }
+
+done:
+   if (argarray) {
+    dMY_CXT;
+
+    if (MY_CXT.uplevel_storage.top->cxix == cxix) {
+     AV  *args  = GvAV(PL_defgv);
+     I32  items = AvFILLp(args);
+
+     av_extend(argarray, items);
+     Copy(AvARRAY(args), AvARRAY(argarray), items + 1, SV *);
+     AvFILLp(argarray) = items;
+    }
+   }
+  }
+
+  PL_op = op = op->op_ppaddr(aTHX);
+
+#if !SU_HAS_PERL(5, 13, 0)
+  PERL_ASYNC_CHECK();
+#endif
+ } while (op);
+
+ TAINT_NOT;
+
+ return 0;
+}
+
+#define su_at_underscore(C) AvARRAY(AvARRAY(CvPADLIST(C))[CvDEPTH(C)])[0]
 
 STATIC void su_uplevel_restore(pTHX_ void *sus_) {
  su_uplevel_ud *sud = sus_;
  PERL_SI *cur = sud->old_curstackinfo;
  PERL_SI *si  = sud->si;
- dMY_CXT;
 
- /* When we reach this place, POPSUB has already been called (with our fake
-  * argarray). GvAV(PL_defgv) points to the savearray (that is, what @_ was
-  * before uplevel). argarray is either the fake AV we created in su_uplevel()
-  * or some empty replacement POPSUB creates when @_ is reified. In both cases
-  * we have to destroy it before the context stack is swapped back to its
-  * original state. */
- SvREFCNT_dec(cxstack[sud->cxix].blk_sub.argarray);
+ if (PL_runops == su_uplevel_goto_runops)
+  PL_runops = sud->old_runops;
+
+ if (sud->callback) {
+  PERL_CONTEXT *cx = cxstack + sud->cxix;
+  AV     *argarray = MUTABLE_AV(su_at_underscore(sud->callback));
+
+  /* We have to fix the pad entry for @_ in the original callback because it
+   * may have been reified. */
+  if (AvREAL(argarray)) {
+   const I32 fill = AvFILLp(argarray);
+   SvREFCNT_dec(argarray);
+   argarray = newAV();
+   AvREAL_off(argarray);
+   AvREIFY_on(argarray);
+   av_extend(argarray, fill);
+   su_at_underscore(sud->callback) = MUTABLE_SV(argarray);
+  } else {
+   CLEAR_ARGARRAY(argarray);
+  }
+
+  /* If the old cv member is our renamed CV, it means that this place has been
+   * reached without a goto() happening, and the old argarray member is
+   * actually our fake argarray. Destroy it properly in that case. */
+  if (cx->blk_sub.cv == sud->renamed) {
+   SvREFCNT_dec(cx->blk_sub.argarray);
+   cx->blk_sub.argarray = argarray;
+  }
+
+  CvDEPTH(sud->callback)--;
+  SvREFCNT_dec(sud->callback);
+ }
+
+ /* Free the renamed CV. We must do it ourselves so that we can force the
+  * depth to be 0, or perl would complain about it being "still in use".
+  * But we *know* that it cannot be so. */
+ if (sud->renamed) {
+  CvDEPTH(sud->renamed)   = 0;
+  CvPADLIST(sud->renamed) = NULL;
+  SvREFCNT_dec(sud->renamed);
+ }
 
  CATCH_SET(sud->old_catch);
-
- SvREFCNT_dec(sud->cloned_cv);
 
  SU_UPLEVEL_RESTORE(op);
 
@@ -957,7 +1137,7 @@ STATIC void su_uplevel_restore(pTHX_ void *sus_) {
   SU_UPLEVEL_RESTORE(curstackinfo);
 
   if (sud->died) {
-   CV *target_cv = sud->target;
+   CV *target = sud->target;
    I32 levels = 0, i;
 
    /* When we die, the depth of the target CV is not updated because of the
@@ -968,7 +1148,7 @@ STATIC void su_uplevel_restore(pTHX_ void *sus_) {
     register const PERL_CONTEXT *cx = cxstack + i;
 
     if (CxTYPE(cx) == CXt_SUB) {
-     if (cx->blk_sub.cv == target_cv)
+     if (cx->blk_sub.cv == target)
       ++levels;
     }
    }
@@ -985,7 +1165,7 @@ STATIC void su_uplevel_restore(pTHX_ void *sus_) {
 
     switch (CxTYPE(cx)) {
      case CXt_SUB:
-      if (cx->blk_sub.cv == target_cv)
+      if (cx->blk_sub.cv == target)
        ++levels;
       break;
      case CXt_EVAL:
@@ -997,7 +1177,7 @@ STATIC void su_uplevel_restore(pTHX_ void *sus_) {
    }
 
 found_it:
-   CvDEPTH(target_cv) = sud->old_depth - levels;
+   CvDEPTH(target) = sud->target_depth - levels;
    PL_curstackinfo->si_cxix = i - 1;
 
 #if !SU_HAS_PERL(5, 13, 1)
@@ -1006,7 +1186,7 @@ found_it:
     * reset $@ to its proper value. Note that the the call to
     * su_uplevel_restore() must happen before the "reset $@" item of the save
     * stack is processed, as uplevel was called after the localization.
-    * Andrew's change to how $@ was treated, which were mainly integrated
+    * Andrew's changes to how $@ was handled, which were mainly integrated
     * between perl 5.13.0 and 5.13.1, fixed this. */
    if (ERRSV && SvTRUE(ERRSV)) {
     register const PERL_CONTEXT *cx = cxstack + i; /* This is the eval scope */
@@ -1028,102 +1208,103 @@ found_it:
  PL_stack_sp   = PL_stack_base + AvFILLp(cur->si_stack);
  PL_stack_max  = PL_stack_base + AvMAX(cur->si_stack);
 
-#if SU_HAS_PERL(5, 8, 0)
- if (MY_CXT.uplevel_storage.count >= SU_UPLEVEL_STORAGE_SIZE) {
-  /* When an exception is thrown from the uplevel'd subroutine,
-   * su_uplevel_restore() may be called by the LEAVE in die_unwind() (called
-   * die_where() in more recent perls), which has the sad habit of keeping a
-   * pointer to the current context frame across this call. This means that
-   * we can't free the temporary context stack we used for the uplevel call
-   * right now, or that pointer upwards would point to garbage. We work around
-   * this by attaching the state data to a scalar that will be freed "soon".
-   * This issue has been fixed in perl with commit 8f89e5a9. */
-  SV *sv = sv_newmortal();
-  sv_magicext(sv, NULL, PERL_MAGIC_ext, &su_uplevel_restore_vtbl,
-                        (const char *) sud, 0);
- } else {
-#endif
+ /* When an exception is thrown from the uplevel'd subroutine,
+  * su_uplevel_restore() may be called by the LEAVE in die_unwind() (renamed
+  * die_where() in more recent perls), which has the sad habit of keeping a
+  * pointer to the current context frame across this call. This means that we
+  * can't free the temporary context stack we used for the uplevel call right
+  * now, or that pointer upwards would point to garbage. */
+#if SU_HAS_PERL(5, 13, 7)
+ /* This issue has been fixed in perl with commit 8f89e5a9, which was made
+  * public in perl 5.13.7. */
+ su_uplevel_storage_delete(sud);
+#else
+ /* Otherwise, we just enqueue it back in the global storage list. */
+ {
+  dMY_CXT;
+
+  MY_CXT.uplevel_storage.top  = sud->next;
   sud->next = MY_CXT.uplevel_storage.root;
   MY_CXT.uplevel_storage.root = sud;
   MY_CXT.uplevel_storage.count++;
-#if SU_HAS_PERL(5, 8, 0)
  }
 #endif
 
  return;
 }
 
-STATIC CV *su_cv_clone(pTHX_ CV *old_cv) {
-#define su_cv_clone(C) su_cv_clone(aTHX_ (C))
- CV *new_cv;
+STATIC CV *su_cv_clone(pTHX_ CV *proto, GV *gv) {
+#define su_cv_clone(P, G) su_cv_clone(aTHX_ (P), (G))
+ dVAR;
+ CV *cv;
 
- /* Starting from commit b5c19bd7, cv_clone() has an assert that checks whether
-  * CvDEPTH(CvOUTSIDE(proto)) > 0, so we have to fool cv_clone() with a little
-  * dance. */
-#if defined(DEBUGGING) && SU_HAS_PERL(5, 9, 0)
- I32 old_depth;
- CV *outside = CvOUTSIDE(old_cv);
+ cv = MUTABLE_CV(newSV_type(SvTYPE(proto)));
 
- if (outside && CvCLONE(outside) && !CvCLONED(outside))
-  outside = find_runcv(NULL);
- old_depth = CvDEPTH(outside);
- if (!old_depth)
-  CvDEPTH(outside) = 1;
+ CvFLAGS(cv)  = CvFLAGS(proto);
+#ifdef CVf_CVGV_RC
+ CvFLAGS(cv) &= ~CVf_CVGV_RC;
+#endif
+ CvDEPTH(cv)  = CvDEPTH(proto);
+#ifdef USE_ITHREADS
+ CvFILE(cv)   = CvISXSUB(proto) ? CvFILE(proto) : savepv(CvFILE(proto));
+#else
+ CvFILE(cv)   = CvFILE(proto);
 #endif
 
- new_cv = cv_clone(old_cv);
-
-#if defined(DEBUGGING) && SU_HAS_PERL(5, 9, 0)
- CvDEPTH(outside) = old_depth;
+ CvGV_set(cv, gv);
+ CvSTASH_set(cv, CvSTASH(proto));
+ /* Commit 4c74a7df, publicized with perl 5.13.3, began to add backrefs to
+  * stashes. CvSTASH_set() started to do it as well with commit c68d95645
+  * (which was part of perl 5.13.7). */
+#if SU_HAS_PERL(5, 13, 3) && !SU_HAS_PERL(5, 13, 7)
+ if (CvSTASH(proto))
+  Perl_sv_add_backref(aTHX_ CvSTASH(proto), MUTABLE_SV(cv));
 #endif
 
- /* Starting from perl 5.9 (more exactly commit b5c19bd7), cv_clone() is no
-  * longer able to clone named subs propery. With this commit, pad_findlex()
-  * stores the parent index of a fake pad entry in the NV slot of the
-  * corresponding pad name SV, but only for anonymous subs (since named subs
-  * aren't supposed to be cloned in pure Perl land). To fix this, we just
-  * manually relink the new fake pad entries to the new ones.
-  * For some reason perl 5.8 crashes too without this, supposedly because of
-  * other closure bugs. Hence we enable it everywhere. */
- if (!CvCLONE(old_cv)) {
-  const AV  *old_padname = (const AV *)  AvARRAY(CvPADLIST(old_cv))[0];
-  AV        *old_pad     = (AV *)        AvARRAY(CvPADLIST(old_cv))[1];
-  AV        *new_pad     = (AV *)        AvARRAY(CvPADLIST(new_cv))[1];
-  const SV **old_aryname = (const SV **) AvARRAY(old_padname);
-  SV       **old_ary     = AvARRAY(old_pad);
-  SV       **new_ary     = AvARRAY(new_pad);
-  I32 fname = AvFILLp(old_padname);
-  I32 fpad  = AvFILLp(old_pad);
-  I32 ix;
-
-  for (ix = fpad; ix > 0; ix--) {
-   const SV *namesv = (ix <= fname) ? old_aryname[ix] : NULL;
-
-   if (namesv && namesv != &PL_sv_undef && SvFAKE(namesv)) {
-    SvREFCNT_dec(new_ary[ix]);
-    new_ary[ix] = SvREFCNT_inc(old_ary[ix]);
-   }
-  }
+ if (CvISXSUB(proto)) {
+  CvXSUB(cv)       = CvXSUB(proto);
+  CvXSUBANY(cv)    = CvXSUBANY(proto);
+ } else {
+  OP_REFCNT_LOCK;
+  CvROOT(cv)       = OpREFCNT_inc(CvROOT(proto));
+  OP_REFCNT_UNLOCK;
+  CvSTART(cv)      = CvSTART(proto);
  }
+ CvOUTSIDE(cv)     = CvOUTSIDE(proto);
+#ifdef CVf_WEAKOUTSIDE
+ if (!(CvFLAGS(proto) & CVf_WEAKOUTSIDE))
+#endif
+  SvREFCNT_inc_simple_void(CvOUTSIDE(cv));
+ CvPADLIST(cv)     = CvPADLIST(proto);
+#ifdef CvOUTSIDE_SEQ
+ CvOUTSIDE_SEQ(cv) = CvOUTSIDE_SEQ(proto);
+#endif
 
- return new_cv;
+ if (SvPOK(proto))
+  sv_setpvn(MUTABLE_SV(cv), SvPVX_const(proto), SvCUR(proto));
+
+#ifdef CvCONST
+ if (CvCONST(cv))
+  CvCONST_off(cv);
+#endif
+
+ return cv;
 }
 
-STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
+STATIC I32 su_uplevel(pTHX_ CV *callback, I32 cxix, I32 args) {
 #define su_uplevel(C, I, A) su_uplevel(aTHX_ (C), (I), (A))
  su_uplevel_ud *sud;
  const PERL_CONTEXT *cx = cxstack + cxix;
  PERL_SI *si;
  PERL_SI *cur = PL_curstackinfo;
  SV **old_stack_sp;
- CV  *target_cv;
+ CV  *target;
+ CV  *renamed;
  UNOP sub_op;
- I32  marksize;
  I32  gimme;
  I32  old_mark, new_mark;
  I32  ret;
  dSP;
- dMY_CXT;
 
  ENTER;
 
@@ -1133,22 +1314,22 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
  old_mark = AvFILLp(PL_curstack) = PL_stack_sp - PL_stack_base;
  SPAGAIN;
 
- sud = MY_CXT.uplevel_storage.root;
- if (sud) {
-  MY_CXT.uplevel_storage.root = sud->next;
-  MY_CXT.uplevel_storage.count--;
- } else {
-  sud = su_uplevel_ud_new();
- }
- si = sud->si;
+ sud = su_uplevel_storage_new();
 
- sud->cxix = cxix;
- sud->died = 1;
+ sud->cxix     = cxix;
+ sud->died     = 1;
+ sud->callback = NULL;
+ sud->renamed  = NULL;
  SAVEDESTRUCTOR_X(su_uplevel_restore, sud);
 
- si->si_type = cur->si_type;
- si->si_next = NULL;
- si->si_prev = cur->si_prev;
+ si = sud->si;
+
+ si->si_type    = cur->si_type;
+ si->si_next    = NULL;
+ si->si_prev    = cur->si_prev;
+#ifdef DEBUGGING
+ si->si_markoff = cx->blk_oldmarksp;
+#endif
 
  /* Allocate enough space for all the elements of the original stack up to the
   * target context, plus the forthcoming arguments. */
@@ -1165,21 +1346,19 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
  PL_stack_max  = PL_stack_base + AvMAX(si->si_stack);
  SPAGAIN;
 
-#ifdef DEBUGGING
- si->si_markoff = cx->blk_oldmarksp;
-#endif
-
  /* Copy the context stack up to the context just below the target. */
- si->si_cxix  = (cxix < 0) ? -1 : (cxix - 1);
- /* The max size must be at least two so that GROW(max) = (max * 3) / 2 > max */
- si->si_cxmax = (cxix < 4) ?  4 : cxix;
- Renew(si->si_cxstack, si->si_cxmax + 1,     PERL_CONTEXT);
+ si->si_cxix = (cxix < 0) ? -1 : (cxix - 1);
+ if (si->si_cxmax < cxix) {
+  /* The max size must be at least two so that GROW(max) = (max*3)/2 > max */
+  si->si_cxmax = (cxix < 4) ? 4 : cxix;
+  Renew(si->si_cxstack, si->si_cxmax + 1, PERL_CONTEXT);
+ }
  Copy(cur->si_cxstack, si->si_cxstack, cxix, PERL_CONTEXT);
  SU_POISON(si->si_cxstack + cxix, si->si_cxmax + 1 - cxix, PERL_CONTEXT);
 
- target_cv      = cx->blk_sub.cv;
- sud->target    = (CV *) SvREFCNT_inc(target_cv);
- sud->old_depth = CvDEPTH(target_cv);
+ target            = cx->blk_sub.cv;
+ sud->target       = (CV *) SvREFCNT_inc(target);
+ sud->target_depth = CvDEPTH(target);
 
  /* blk_oldcop is essentially needed for caller() and stack traces. It has no
   * run-time implication, since PL_curcop will be overwritten as soon as we
@@ -1188,8 +1367,7 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
   * reports the right file name, line number and lexical hints. */
  SU_UPLEVEL_SAVE(curcop, cx->blk_oldcop);
  /* Don't reset PL_markstack_ptr, or we would overwrite the mark stack below
-  * this point. */
- /* Don't reset PL_curpm, we want the most recent matches. */
+  * this point. Don't reset PL_curpm either, we want the most recent matches. */
 
  SU_UPLEVEL_SAVE(curstackinfo, si);
  /* If those two are equal, we need to fool POPSTACK_TO() */
@@ -1199,15 +1377,14 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
   sud->old_mainstack = NULL;
  PL_curstack = si->si_stack;
 
- cv = su_cv_clone(cv);
- sud->cloned_cv = cv;
- CvGV_set(cv, CvGV(target_cv));
+ renamed      = su_cv_clone(callback, CvGV(target));
+ sud->renamed = renamed;
 
  PUSHMARK(SP);
- /* Both SP and old_stack_sp points just before the CV. */
+ /* Both SP and old_stack_sp point just before the CV. */
  Copy(old_stack_sp + 2, SP + 1, args, SV *);
  SP += args;
- PUSHs((SV *) cv);
+ PUSHs((SV *) renamed);
  PUTBACK;
 
  Zero(&sub_op, 1, UNOP);
@@ -1219,10 +1396,20 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
 
  SU_UPLEVEL_SAVE(op, (OP *) &sub_op);
 
+ sud->old_runops = PL_runops;
+
  sud->old_catch = CATCH_GET;
  CATCH_SET(TRUE);
 
- if (PL_op = PL_ppaddr[OP_ENTERSUB](aTHX)) {
+ if ((PL_op = PL_ppaddr[OP_ENTERSUB](aTHX))) {
+  PERL_CONTEXT *sub_cx = cxstack + cxstack_ix;
+
+  /* If pp_entersub() returns a non-null OP, it means that the callback is not
+   * an XSUB. */
+
+  sud->callback = MUTABLE_CV(SvREFCNT_inc(callback));
+  CvDEPTH(callback)++;
+
   if (CxHASARGS(cx) && cx->blk_sub.argarray) {
    /* The call to pp_entersub() has saved the current @_ (in XS terms,
     * GvAV(PL_defgv)) in the savearray member, and has created a new argarray
@@ -1231,23 +1418,33 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
     * argarray with an unreal copy of the original @_. */
    AV *av = newAV();
    AvREAL_off(av);
+   AvREIFY_on(av);
    av_extend(av, AvMAX(cx->blk_sub.argarray));
    AvFILLp(av) = AvFILLp(cx->blk_sub.argarray);
    Copy(AvARRAY(cx->blk_sub.argarray), AvARRAY(av), AvFILLp(av) + 1, SV *);
-   cxstack[cxix].blk_sub.argarray = av;
+   sub_cx->blk_sub.argarray = av;
   } else {
-   SvREFCNT_inc(cxstack[cxix].blk_sub.argarray);
+   SvREFCNT_inc_simple_void(sub_cx->blk_sub.argarray);
+  }
+
+  if (su_uplevel_goto_static(CvROOT(renamed))) {
+   if (PL_runops != Perl_runops_standard) {
+    if (PL_runops == Perl_runops_debug) {
+     if (PL_debug)
+      croak("uplevel() can't execute code that calls goto when debugging flags are set");
+    } else if (PL_runops != su_uplevel_goto_runops)
+     croak("uplevel() can't execute code that calls goto with a custom runloop");
+   }
+
+   PL_runops = su_uplevel_goto_runops;
   }
 
   CALLRUNOPS(aTHX);
-
-  ret = PL_stack_sp - (PL_stack_base + new_mark);
  }
 
  sud->died = 0;
 
- SPAGAIN;
-
+ ret = PL_stack_sp - (PL_stack_base + new_mark);
  if (ret > 0) {
   AV *old_stack = sud->old_curstackinfo->si_stack;
 
@@ -1262,8 +1459,6 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
   AvFILLp(old_stack) += ret;
  }
 
- PUTBACK;
-
  LEAVE;
 
  return ret;
@@ -1272,7 +1467,7 @@ STATIC I32 su_uplevel(pTHX_ CV *cv, I32 cxix, I32 args) {
 /* --- Interpreter setup/teardown ------------------------------------------ */
 
 STATIC void su_teardown(pTHX_ void *param) {
- su_uplevel_ud *cur, *prev;
+ su_uplevel_ud *cur;
  dMY_CXT;
 
  cur = MY_CXT.uplevel_storage.root;
@@ -1295,14 +1490,15 @@ STATIC void su_setup(pTHX) {
  MY_CXT.stack_placeholder = NULL;
 
  /* NewOp() calls calloc() which just zeroes the memory with memset(). */
- Zero(&(MY_CXT.return_op), 1, sizeof(MY_CXT.return_op));
- MY_CXT.return_op.op_type   = OP_RETURN;
- MY_CXT.return_op.op_ppaddr = PL_ppaddr[OP_RETURN];
+ Zero(&(MY_CXT.unwind_storage.return_op), 1, LISTOP);
+ MY_CXT.unwind_storage.return_op.op_type   = OP_RETURN;
+ MY_CXT.unwind_storage.return_op.op_ppaddr = PL_ppaddr[OP_RETURN];
 
- Zero(&(MY_CXT.proxy_op), 1, sizeof(MY_CXT.proxy_op));
- MY_CXT.proxy_op.op_type   = OP_STUB;
- MY_CXT.proxy_op.op_ppaddr = NULL;
+ Zero(&(MY_CXT.unwind_storage.proxy_op), 1, OP);
+ MY_CXT.unwind_storage.proxy_op.op_type   = OP_STUB;
+ MY_CXT.unwind_storage.proxy_op.op_ppaddr = NULL;
 
+ MY_CXT.uplevel_storage.top   = NULL;
  MY_CXT.uplevel_storage.root  = NULL;
  MY_CXT.uplevel_storage.count = 0;
 
@@ -1396,16 +1592,16 @@ XS(XS_Scope__Upper_unwind) {
      continue;
    case CXt_EVAL:
    case CXt_FORMAT:
-    MY_CXT.cxix  = cxix;
-    MY_CXT.items = items;
+    MY_CXT.unwind_storage.cxix  = cxix;
+    MY_CXT.unwind_storage.items = items;
     /* pp_entersub will want to sanitize the stack after returning from there
      * Screw that, we're insane */
     if (GIMME_V == G_SCALAR) {
-     MY_CXT.savesp = PL_stack_sp;
+     MY_CXT.unwind_storage.savesp = PL_stack_sp;
      /* dXSARGS calls POPMARK, so we need to match PL_markstack_ptr[1] */
      PL_stack_sp = PL_stack_base + PL_markstack_ptr[1] + 1;
     } else {
-     MY_CXT.savesp = NULL;
+     MY_CXT.unwind_storage.savesp = NULL;
     }
     SAVEDESTRUCTOR_X(su_unwind, NULL);
     return;
@@ -1441,6 +1637,7 @@ PROTOTYPE: DISABLE
 PPCODE:
  {
   MY_CXT_CLONE;
+  MY_CXT.uplevel_storage.top   = NULL;
   MY_CXT.uplevel_storage.root  = NULL;
   MY_CXT.uplevel_storage.count = 0;
  }
@@ -1448,32 +1645,32 @@ PPCODE:
 
 #endif /* SU_THREADSAFE */
 
-SV *
+void
 HERE()
 PROTOTYPE:
 PREINIT:
  I32 cxix = cxstack_ix;
-CODE:
+PPCODE:
  if (PL_DBsub)
   SU_SKIP_DB(cxix);
- RETVAL = newSViv(cxix);
-OUTPUT:
- RETVAL
+ EXTEND(SP, 1);
+ mPUSHi(cxix);
+ XSRETURN(1);
 
-SV *
+void
 UP(...)
 PROTOTYPE: ;$
 PREINIT:
  I32 cxix;
-CODE:
+PPCODE:
  SU_GET_CONTEXT(0, 0);
  if (--cxix < 0)
   cxix = 0;
  if (PL_DBsub)
   SU_SKIP_DB(cxix);
- RETVAL = newSViv(cxix);
-OUTPUT:
- RETVAL
+ EXTEND(SP, 1);
+ mPUSHi(cxix);
+ XSRETURN(1);
 
 void
 SUB(...)
@@ -1482,6 +1679,7 @@ PREINIT:
  I32 cxix;
 PPCODE:
  SU_GET_CONTEXT(0, 0);
+ EXTEND(SP, 1);
  for (; cxix >= 0; --cxix) {
   PERL_CONTEXT *cx = cxstack + cxix;
   switch (CxTYPE(cx)) {
@@ -1490,7 +1688,7 @@ PPCODE:
    case CXt_SUB:
     if (PL_DBsub && cx->blk_sub.cv == GvCV(PL_DBsub))
      continue;
-    ST(0) = sv_2mortal(newSViv(cxix));
+    mPUSHi(cxix);
     XSRETURN(1);
   }
  }
@@ -1503,13 +1701,14 @@ PREINIT:
  I32 cxix;
 PPCODE:
  SU_GET_CONTEXT(0, 0);
+ EXTEND(SP, 1);
  for (; cxix >= 0; --cxix) {
   PERL_CONTEXT *cx = cxstack + cxix;
   switch (CxTYPE(cx)) {
    default:
     continue;
    case CXt_EVAL:
-    ST(0) = sv_2mortal(newSViv(cxix));
+    mPUSHi(cxix);
     XSRETURN(1);
   }
  }
@@ -1536,7 +1735,8 @@ PPCODE:
   if (cxix < 0)
    cxix = 0;
  }
- ST(0) = sv_2mortal(newSViv(cxix));
+ EXTEND(SP, 1);
+ mPUSHi(cxix);
  XSRETURN(1);
 
 void
@@ -1560,7 +1760,8 @@ PPCODE:
   }
  }
 done:
- ST(0) = sv_2mortal(newSViv(cxix));
+ EXTEND(SP, 1);
+ mPUSHi(cxix);
  XSRETURN(1);
 
 void
@@ -1570,6 +1771,7 @@ PREINIT:
  I32 cxix;
 PPCODE:
  SU_GET_CONTEXT(0, 0);
+ EXTEND(SP, 1);
  while (cxix > 0) {
   PERL_CONTEXT *cx = cxstack + cxix--;
   switch (CxTYPE(cx)) {
@@ -1678,6 +1880,7 @@ PPCODE:
      PL_stack_sp--;
      args = items - 2;
     }
+    /* su_uplevel() takes care of extending the stack if needed. */
     ret = su_uplevel((CV *) code, cxix, args);
     XSRETURN(ret);
    default:
