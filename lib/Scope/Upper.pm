@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.17
+Version 0.18
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.17';
+ $VERSION = '0.18';
 }
 
 =head1 SYNOPSIS
@@ -24,7 +24,10 @@ L</reap>, L</localize>, L</localize_elem>, L</localize_delete> and L</WORDS> :
 
     package Scope;
 
-    use Scope::Upper qw<reap localize localize_elem localize_delete :words>;
+    use Scope::Upper qw<
+     reap localize localize_elem localize_delete
+     :words
+    >;
 
     sub new {
      my ($class, $name) = @_;
@@ -66,22 +69,22 @@ L</reap>, L</localize>, L</localize_elem>, L</localize_delete> and L</WORDS> :
     package UserLand;
 
     {
-     Scope->new("top");      # initializes $UserLand::tag
+     Scope->new("top");    # initializes $UserLand::tag
 
      {
       Scope->catch;
-      my $one = 1 + undef;   # prints "top: Use of uninitialized value..."
+      my $one = 1 + undef; # prints "top: Use of uninitialized value..."
 
       {
        Scope->private;
        eval { require Cwd };
-       print $@;             # prints "Can't locate Cwd.pm in @INC (@INC contains:) at..."
-      }
+       print $@;           # prints "Can't locate Cwd.pm in @INC
+      }                    #         (@INC contains:) at..."
 
-      require Cwd;           # loads Cwd.pm
+      require Cwd;         # loads Cwd.pm
      }
 
-    }                        # prints "top: done"
+    }                      # prints "top: done"
 
 L</unwind> and L</want_at> :
 
@@ -128,6 +131,28 @@ L</uplevel> :
 
     target('hello'); # "hello from Uplevel::target()"
 
+L</uid> and L</validate_uid> :
+
+    use Scope::Upper qw<uid validate_uid>;
+
+    my $uid;
+
+    {
+     $uid = uid();
+     {
+      if ($uid eq uid(UP)) { # yes
+       ...
+      }
+      if (validate_uid($uid)) { # yes
+       ...
+      }
+     }
+    }
+
+    if (validate_uid($uid)) { # no
+     ...
+    }
+
 =head1 DESCRIPTION
 
 This module lets you defer actions I<at run-time> that will take place when the control flow returns into an upper scope.
@@ -149,7 +174,11 @@ return values immediately to an upper level with L</unwind>, and know which cont
 
 =item *
 
-execute a subroutine in the setting of an upper subroutine stack frame with L</uplevel>.
+execute a subroutine in the setting of an upper subroutine stack frame with L</uplevel> ;
+
+=item *
+
+uniquely identify contextes with L</uid> and L</validate_uid>.
 
 =back
 
@@ -353,6 +382,73 @@ A simple wrapper lets you mimic the interface of L<Sub::Uplevel/uplevel> :
 
 Albeit the three exceptions listed above, it passes all the tests of L<Sub::Uplevel>.
 
+=head2 C<uid $context>
+
+Returns an unique identifier (UID) for the context (or dynamic scope) pointed by C<$context>, or for the current context if C<$context> is omitted.
+This UID will only be valid for the life time of the context it represents, and another UID will be generated next time the same scope is executed.
+
+    my $uid;
+
+    {
+     $uid = uid;
+     if ($uid eq uid()) { # yes, this is the same context
+      ...
+     }
+     {
+      if ($uid eq uid()) { # no, we are one scope below
+       ...
+      }
+      if ($uid eq uid(UP)) { # yes, UP points to the same scope as $uid
+       ...
+      }
+     }
+    }
+
+    # $uid is now invalid
+
+    {
+     if ($uid eq uid()) { # no, this is another block
+      ...
+     }
+    }
+
+For example, each loop iteration gets its own UID :
+
+    my %uids;
+
+    for (1 .. 5) {
+     my $uid = uid;
+     $uids{$uid} = $_;
+    }
+
+    # %uids has 5 entries
+
+The UIDs are not guaranteed to be numbers, so you must use the C<eq> operator to compare them.
+
+To check whether a given UID is valid, you can use the L</validate_uid> function.
+
+=head2 C<validate_uid $uid>
+
+Returns true if and only if C<$uid> is the UID of a currently valid context (that is, it designates a scope that is higher than the current one in the call stack).
+
+    my $uid;
+
+    {
+     $uid = uid();
+     if (validate_uid($uid)) { # yes
+      ...
+     }
+     {
+      if (validate_uid($uid)) { # yes
+       ...
+      }
+     }
+    }
+
+    if (validate_uid($uid)) { # no
+     ...
+    }
+
 =head1 CONSTANTS
 
 =head2 C<SU_THREADSAFE>
@@ -414,13 +510,13 @@ Where L</reap> fires depending on the C<$cxt> :
        {
         reap \&cleanup => $cxt;
         ...
-       }     # $cxt = SCOPE(0), or HERE
+       }     # $cxt = SCOPE(0) = HERE
        ...
-      }->(); # $cxt = SCOPE(1), or UP, or SUB, or CALLER, or CALLER(0)
+      }->(); # $cxt = SCOPE(1) = UP = SUB = CALLER(0)
       ...
-     };      # $cxt = SCOPE(2), or UP UP, or UP SUB, or EVAL, or CALLER(1)
+     };      # $cxt = SCOPE(2) = UP UP =  UP SUB = EVAL = CALLER(1)
      ...
-    }->();   # $cxt = SCOPE(3), or SUB UP SUB, or SUB EVAL, or CALLER(2)
+    }->();   # $cxt = SCOPE(3) = SUB UP SUB = SUB EVAL = CALLER(2)
     ...
 
 Where L</localize>, L</localize_elem> and L</localize_delete> act depending on the C<$cxt> :
@@ -430,19 +526,19 @@ Where L</localize>, L</localize_elem> and L</localize_delete> act depending on t
       sub {
        {
         localize '$x' => 1 => $cxt;
-        # $cxt = SCOPE(0), or HERE
+        # $cxt = SCOPE(0) = HERE
         ...
        }
-       # $cxt = SCOPE(1), or UP, or SUB, or CALLER, or CALLER(0)
+       # $cxt = SCOPE(1) = UP = SUB = CALLER(0)
        ...
       }->();
-      # $cxt = SCOPE(2), or UP UP, or UP SUB, or EVAL, or CALLER(1)
+      # $cxt = SCOPE(2) = UP UP = UP SUB = EVAL = CALLER(1)
       ...
      };
-     # $cxt = SCOPE(3), or SUB UP SUB, or SUB EVAL, or CALLER(2)
+     # $cxt = SCOPE(3) = SUB UP SUB = SUB EVAL = CALLER(2)
      ...
     }->();
-    # $cxt = SCOPE(4), UP SUB UP SUB, or UP SUB EVAL, or UP CALLER(2), or TOP
+    # $cxt = SCOPE(4), UP SUB UP SUB = UP SUB EVAL = UP CALLER(2) = TOP
     ...
 
 Where L</unwind>, L</want_at> and L</uplevel> point to depending on the C<$cxt>:
@@ -451,15 +547,15 @@ Where L</unwind>, L</want_at> and L</uplevel> point to depending on the C<$cxt>:
      eval {
       sub {
        {
-        unwind @things => $cxt;     # or uplevel { ... } $cxt;
+        unwind @things => $cxt;   # or uplevel { ... } $cxt;
         ...
        }
        ...
-      }->(); # $cxt = SCOPE(0 .. 1), or HERE, or UP, or SUB, or CALLER(0)
+      }->(); # $cxt = SCOPE(0) = SCOPE(1) = HERE = UP = SUB = CALLER(0)
       ...
-     };      # $cxt = SCOPE(2), or UP UP, or UP SUB, or EVAL, or CALLER(1) (*)
+     };      # $cxt = SCOPE(2) = UP UP = UP SUB = EVAL = CALLER(1) (*)
      ...
-    }->();   # $cxt = SCOPE(3), or SUB UP SUB, or SUB EVAL, or CALLER(2)
+    }->();   # $cxt = SCOPE(3) = SUB UP SUB = SUB EVAL = CALLER(2)
     ...
 
     # (*) Note that uplevel() will croak if you pass that scope frame,
@@ -484,6 +580,7 @@ our %EXPORT_TAGS = (
   localize localize_elem localize_delete
   unwind want_at
   uplevel
+  uid validate_uid
  > ],
  words  => [ qw<TOP HERE UP SUB EVAL SCOPE CALLER> ],
  consts => [ qw<SU_THREADSAFE> ],
@@ -520,8 +617,25 @@ However, it's possible to hook the end of the current scope compilation with L<B
 Some rare oddities may still happen when running inside the debugger.
 It may help to use a perl higher than 5.8.9 or 5.10.0, as they contain some context-related fixes.
 
-Calling C<goto> to replace an L</uplevel>'d code frame does not work when a custom runloop is used or when debugging flags are set with C<perl -D>.
-In those two cases, L</uplevel> will look for a C<goto &sub> statement in its callback and, if there is one, throw an exception before executing the code.
+Calling C<goto> to replace an L</uplevel>'d code frame does not work :
+
+=over 4
+
+=item *
+
+for a C<perl> older than the 5.8 series ;
+
+=item *
+
+for a C<DEBUGGING> C<perl> run with debugging flags set (as in C<perl -D ...>) ;
+
+=item *
+
+when the runloop callback is replaced by another module.
+
+=back
+
+In those three cases, L</uplevel> will look for a C<goto &sub> statement in its callback and, if there is one, throw an exception before executing the code.
 
 Moreover, in order to handle C<goto> statements properly, L</uplevel> currently has to suffer a run-time overhead proportional to the size of the the callback in every case (with a small ratio), and proportional to the size of B<all> the code executed as the result of the L</uplevel> call (including subroutine calls inside the callback) when a C<goto> statement is found in the L</uplevel> callback.
 Despite this shortcoming, this XS version of L</uplevel> should still run way faster than the pure-Perl version from L<Sub::Uplevel>.
