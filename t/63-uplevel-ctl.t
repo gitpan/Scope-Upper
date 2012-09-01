@@ -151,7 +151,7 @@ our $hurp;
 
 SKIP: {
  skip "Causes failures during global destruction on perl 5.8.[0126]" => 5
-                    if ("$]" >= 5.008 and "$]" <= 5.008002) or "$]" == 5.008006;
+                  if ("$]" >= 5.008 and "$]" <= 5.008_002) or "$]" == 5.008_006;
  my $desc = 'exception with an eval and a local $@ in between';
  local $hurp = 'durp';
  local $@;
@@ -223,7 +223,7 @@ SKIP: {
  like $@, qr/^tomato at \Q$0\E line $line/, "$desc (third): correct exception";
 }
 
-my $has_B = do { local $@; eval 'require B; 1' };
+my $has_B = do { local $@; eval { require B; 1 } };
 
 sub check_depth {
  my ($code, $expected, $desc) = @_;

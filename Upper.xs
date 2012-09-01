@@ -116,6 +116,10 @@ STATIC SV *su_newSV_type(pTHX_ svtype t) {
 # define CvISXSUB(C) CvXSUB(C)
 #endif
 
+#ifndef PADLIST_ARRAY
+# define PADLIST_ARRAY(P) AvARRAY(P)
+#endif
+
 #ifndef CxHASARGS
 # define CxHASARGS(C) ((C)->blk_sub.hasargs)
 #endif
@@ -322,30 +326,32 @@ typedef struct {
 #define SU_UPLEVEL_HIJACKS_RUNOPS SU_HAS_PERL(5, 8, 0)
 
 typedef struct {
- void *next;
+ void          *next;
 
- I32  cxix;
- bool died;
+ su_uid_storage tmp_uid_storage;
+ su_uid_storage old_uid_storage;
 
- CV  *target;
- I32  target_depth;
+ I32            cxix;
 
- CV  *callback;
- CV  *renamed;
+ I32            target_depth;
+ CV            *target;
 
- PERL_SI *si;
- PERL_SI *old_curstackinfo;
- AV      *old_mainstack;
+ CV            *callback;
+ CV            *renamed;
 
- COP *old_curcop;
+ PERL_SI       *si;
+ PERL_SI       *old_curstackinfo;
+ AV            *old_mainstack;
 
+ COP           *old_curcop;
+
+ OP            *old_op;
 #if SU_UPLEVEL_HIJACKS_RUNOPS
  runops_proc_t  old_runops;
 #endif
  bool           old_catch;
- OP            *old_op;
 
- su_uid_storage new_uid_storage, old_uid_storage;
+ bool           died;
 } su_uplevel_ud;
 
 STATIC su_uplevel_ud *su_uplevel_ud_new(pTHX) {
@@ -356,9 +362,9 @@ STATIC su_uplevel_ud *su_uplevel_ud_new(pTHX) {
  Newx(sud, 1, su_uplevel_ud);
  sud->next = NULL;
 
- sud->new_uid_storage.map   = NULL;
- sud->new_uid_storage.used  = 0;
- sud->new_uid_storage.alloc = 0;
+ sud->tmp_uid_storage.map   = NULL;
+ sud->tmp_uid_storage.used  = 0;
+ sud->tmp_uid_storage.alloc = 0;
 
  Newx(si, 1, PERL_SI);
  si->si_stack   = newAV();
@@ -379,9 +385,9 @@ STATIC void su_uplevel_ud_delete(pTHX_ su_uplevel_ud *sud) {
  SvREFCNT_dec(si->si_stack);
  Safefree(si);
 
- if (sud->new_uid_storage.map) {
-  su_uid **map   = sud->new_uid_storage.map;
-  STRLEN   alloc = sud->new_uid_storage.alloc;
+ if (sud->tmp_uid_storage.map) {
+  su_uid **map   = sud->tmp_uid_storage.map;
+  STRLEN   alloc = sud->tmp_uid_storage.alloc;
   STRLEN   i;
 
   for (i = 0; i < alloc; ++i)
@@ -658,6 +664,8 @@ typedef struct {
 
 /* ... Reap ................................................................ */
 
+#define SU_SAVE_LAST_CX (!SU_HAS_PERL(5, 8, 4) || (SU_HAS_PERL(5, 9, 5) && !SU_HAS_PERL(5, 14, 0)) || SU_HAS_PERL(5, 15, 0))
+
 typedef struct {
  su_ud_common ci;
  SV *cb;
@@ -665,10 +673,10 @@ typedef struct {
 
 STATIC void su_call(pTHX_ void *ud_) {
  su_ud_reap *ud = (su_ud_reap *) ud_;
-#if SU_HAS_PERL(5, 9, 5)
- PERL_CONTEXT saved_cx;
+#if SU_SAVE_LAST_CX
  I32 cxix;
-#endif
+ PERL_CONTEXT saved_cx;
+#endif /* SU_SAVE_LAST_CX */
 
  dSP;
 
@@ -684,22 +692,18 @@ STATIC void su_call(pTHX_ void *ud_) {
  PUSHMARK(SP);
  PUTBACK;
 
+#if SU_SAVE_LAST_CX
  /* If the recently popped context isn't saved there, it will be overwritten by
   * the sub scope from call_sv, although it's still needed in our caller. */
-
-#if SU_HAS_PERL(5, 9, 5)
- if (cxstack_ix < cxstack_max)
-  cxix = cxstack_ix + 1;
- else
-  cxix = Perl_cxinc(aTHX);
+ cxix     = (cxstack_ix < cxstack_max) ? (cxstack_ix + 1) : Perl_cxinc(aTHX);
  saved_cx = cxstack[cxix];
-#endif
+#endif /* SU_SAVE_LAST_CX */
 
  call_sv(ud->cb, G_VOID);
 
-#if SU_HAS_PERL(5, 9, 5)
+#if SU_SAVE_LAST_CX
  cxstack[cxix] = saved_cx;
-#endif
+#endif /* SU_SAVE_LAST_CX */
 
  PUTBACK;
 
@@ -1132,9 +1136,9 @@ STATIC su_uplevel_ud *su_uplevel_storage_new(pTHX_ I32 cxix) {
  MY_CXT.uplevel_storage.top = sud;
 
  depth = su_uid_depth(cxix);
- su_uid_storage_dup(&sud->new_uid_storage, &MY_CXT.uid_storage, depth);
+ su_uid_storage_dup(&sud->tmp_uid_storage, &MY_CXT.uid_storage, depth);
  sud->old_uid_storage = MY_CXT.uid_storage;
- MY_CXT.uid_storage   = sud->new_uid_storage;
+ MY_CXT.uid_storage   = sud->tmp_uid_storage;
 
  return sud;
 }
@@ -1143,13 +1147,13 @@ STATIC void su_uplevel_storage_delete(pTHX_ su_uplevel_ud *sud) {
 #define su_uplevel_storage_delete(S) su_uplevel_storage_delete(aTHX_ (S))
  dMY_CXT;
 
- sud->new_uid_storage = MY_CXT.uid_storage;
+ sud->tmp_uid_storage = MY_CXT.uid_storage;
  MY_CXT.uid_storage   = sud->old_uid_storage;
  {
   su_uid **map;
   UV  i, alloc;
-  map   = sud->new_uid_storage.map;
-  alloc = sud->new_uid_storage.alloc;
+  map   = sud->tmp_uid_storage.map;
+  alloc = sud->tmp_uid_storage.alloc;
   for (i = 0; i < alloc; ++i) {
    if (map[i])
     map[i]->flags &= SU_UID_ACTIVE;
@@ -1249,7 +1253,7 @@ done:
 
 #endif /* SU_UPLEVEL_HIJACKS_RUNOPS */
 
-#define su_at_underscore(C) AvARRAY(AvARRAY(CvPADLIST(C))[CvDEPTH(C)])[0]
+#define su_at_underscore(C) AvARRAY(PADLIST_ARRAY(CvPADLIST(C))[CvDEPTH(C)])[0]
 
 STATIC void su_uplevel_restore(pTHX_ void *sus_) {
  su_uplevel_ud *sud = sus_;
@@ -1398,7 +1402,7 @@ found_it:
  {
   dMY_CXT;
 
-  sud->new_uid_storage = MY_CXT.uid_storage;
+  sud->tmp_uid_storage = MY_CXT.uid_storage;
   MY_CXT.uid_storage   = sud->old_uid_storage;
 
   MY_CXT.uplevel_storage.top  = sud->next;
