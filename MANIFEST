@@ -13,6 +13,7 @@ t/00-load.t
 t/01-import.t
 t/05-words.t
 t/06-want_at.t
+t/07-context_info.t
 t/11-reap-level.t
 t/12-reap-block.t
 t/13-reap-ctl.t
@@ -35,9 +36,13 @@ t/41-localize_delete-level.t
 t/44-localize_delete-magic.t
 t/46-localize_delete-numerous.t
 t/50-unwind-target.t
-t/55-unwind-multi.t
-t/56-unwind-context.t
-t/59-unwind-threads.t
+t/51-unwind-multi.t
+t/52-unwind-context.t
+t/54-unwind-threads.t
+t/55-yield-target.t
+t/57-yield-context.t
+t/58-yield-misc.t
+t/59-yield-threads.t
 t/60-uplevel-target.t
 t/61-uplevel-args.t
 t/62-uplevel-return.t
@@ -52,7 +57,8 @@ t/74-uid-validate.t
 t/75-uid-uplevel.t
 t/79-uid-threads.t
 t/81-stress-level.t
-t/85-stress-unwind.t
+t/84-stress-unwind.t
+t/85-stress-yield.t
 t/86-stress-uplevel.t
 t/87-stress-uid.t
 t/91-pod.t

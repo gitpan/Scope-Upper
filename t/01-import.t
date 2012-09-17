@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-use Test::More tests => 2 * 17;
+use Test::More tests => 2 * 20;
 
 require Scope::Upper;
 
@@ -13,7 +13,10 @@ my %syms = (
  localize_elem   => '$$$;$',
  localize_delete => '$$;$',
  unwind          => undef,
+ yield           => undef,
+ leave           => undef,
  want_at         => ';$',
+ context_info    => ';$',
  uplevel         => '&@',
  uid             => ';$',
  validate_uid    => '$',

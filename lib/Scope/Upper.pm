@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.19
+Version 0.20
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.19';
+ $VERSION = '0.20';
 }
 
 =head1 SYNOPSIS
@@ -170,7 +170,11 @@ localize variables, array/hash values or deletions of elements in higher context
 
 =item *
 
-return values immediately to an upper level with L</unwind>, and know which context was in use then with L</want_at> ;
+return values immediately to an upper level with L</unwind>, L</yield> and L</leave> ;
+
+=item *
+
+gather information about an upper context with L</want_at> and L</context_info> ;
 
 =item *
 
@@ -270,7 +274,10 @@ C<$key> is either an array index or a hash key, depending of which kind of varia
 
 If C<$what> is a string pointing to an undeclared variable, the variable will be vivified as soon as the localization occurs and emptied when it ends, although it will still exist in its glob.
 
-=head2 C<localize_delete $what, $key, $context>
+=head2 C<localize_delete>
+
+    localize_delete $what, $key;
+    localize_delete $what, $key, $context;
 
 Introduces the deletion of a variable or an array/hash element delayed to the time of first return into the upper scope denoted by C<$context>.
 C<$what> can be:
@@ -295,10 +302,11 @@ C<$key> is ignored.
 
 =head2 C<unwind>
 
-    unwind @values;
+    unwind;
     unwind @values, $context;
 
-Returns C<@values> I<from> the context pointed by C<$context>, i.e. from the subroutine, eval or format at or just above C<$context>, and immediately restart the program flow at this point - thus effectively returning to an upper scope.
+Returns C<@values> I<from> the subroutine, eval or format context pointed by or just above C<$context>, and immediately restart the program flow at this point - thus effectively returning C<@values> to an upper scope.
+If C<@values> is empty, then the C<$context> parameter is optional and defaults to the current context (making the call equivalent to a bare C<return;>) ; otherwise it is mandatory.
 
 The upper context isn't coerced onto C<@values>, which is hence always evaluated in list context.
 This means that
@@ -312,14 +320,49 @@ This means that
 will set C<$num> to C<'z'>.
 You can use L</want_at> to handle these cases.
 
+=head2 C<yield>
+
+    yield;
+    yield @values, $context;
+
+Returns C<@values> I<from> the context pointed by or just above C<$context>, and immediately restart the program flow at this point.
+If C<@values> is empty, then the C<$context> parameter is optional and defaults to the current context ; otherwise it is mandatory.
+
+L</yield> differs from L</unwind> in that it can target I<any> upper scope (besides a C<s///e> substitution context) and not necessarily a sub, an eval or a format.
+Hence you can use it to return values from a C<do> or a C<map> block :
+
+    my $now = do {
+     local $@;
+     eval { require Time::HiRes } or yield time() => HERE;
+     Time::HiRes::time();
+    };
+
+    my @uniq = map {
+     yield if $seen{$_}++; # returns the empty list from the block
+     ...
+    } @things;
+
+Like for L</unwind>, the upper context isn't coerced onto C<@values>.
+You can use the fifth value returned by L</context_info> to handle context coercion.
+
+=head2 C<leave>
+
+    leave;
+    leave @values;
+
+Immediately returns C<@values> from the current block, whatever it may be (besides a C<s///e> substitution context).
+C<leave> is actually a synonym for C<unwind HERE>, while C<leave @values> is a synonym for C<yield @values, HERE>.
+
+Like for L</yield>, you can use the fifth value returned by L</context_info> to handle context coercion.
+
 =head2 C<want_at>
 
     my $want = want_at;
     my $want = want_at $context;
 
-Like C<wantarray>, but for the subroutine/eval/format at or just above C<$context>.
+Like L<perlfunc/wantarray>, but for the subroutine, eval or format context located at or just above C<$context>.
 
-The previous example can then be "corrected" :
+It can be used to revise the example showed in L</unwind> :
 
     my $num = sub {
      my @a = ('a' .. 'z');
@@ -329,14 +372,72 @@ The previous example can then be "corrected" :
 
 will rightfully set C<$num> to C<26>.
 
-=head2 C<uplevel $code, @args, $context>
+=head2 C<context_info>
+
+    my ($package, $filename, $line, $subroutine, $hasargs,
+        $wantarray, $evaltext, $is_require, $hints, $bitmask,
+        $hinthash) = context_info $context;
+
+Gives information about the context denoted by C<$context>, akin to what L<perlfunc/caller> provides but not limited only to subroutine, eval and format contexts.
+When C<$context> is omitted, it defaults to the current context.
+
+The values returned are, in order :
+
+=over 4
+
+=item *
+
+I<(index 0)> : the namespace in use when the context was created ;
+
+=item *
+
+I<(index 1)> : the name of the file at the point where the context was created ;
+
+=item *
+
+I<(index 2)> : the line number at the point where the context was created ;
+
+=item *
+
+I<(index 3)> : the name of the subroutine called for this context, or C<undef> if this is not a subroutine context ;
+
+=item *
+
+I<(index 4)> : a boolean indicating whether a new instance of C<@_> was set up for this context, or C<undef> if this is not a subroutine context ;
+
+=item *
+
+I<(index 5)> : the context (in the sense of L<perlfunc/wantarray>) in which the context (in our sense) is executed ;
+
+=item *
+
+I<(index 6)> : the contents of the string being compiled for this context, or C<undef> if this is not an eval context ;
+
+=item *
+
+I<(index 7)> : a boolean indicating whether this eval context was created by C<require>, or C<undef> if this is not an eval context ;
+
+=item *
+
+I<(index 8)> : the value of the lexical hints in use when the context was created ;
+
+=item *
+
+I<(index 9)> : a bit string representing the warnings in use when the context was created ;
+
+=item *
+
+I<(index 10)> : a reference to the lexical hints hash in use when the context was created (only on perl 5.10 or greater).
+
+=back
+
+=head2 C<uplevel>
 
     my @ret = uplevel { ...; return @ret };
-    my @ret = uplevel { my @args = @_; ...; return @ret } @args;
-    my @ret = uplevel { ... } @args, $context;
+    my @ret = uplevel { my @args = @_; ...; return @ret } @args, $context;
     my @ret = &uplevel($callback, @args, $context);
 
-Executes the code reference C<$code> with arguments C<@args> as if it were located at the subroutine stack frame pointed by C<$context>, effectively fooling C<caller> and C<die> into believing that the call actually happened higher in the stack.
+Executes the code reference C<$callback> with arguments C<@args> as if it were located at the subroutine stack frame pointed by C<$context>, effectively fooling C<caller> and C<die> into believing that the call actually happened higher in the stack.
 The code is executed in the context of the C<uplevel> call, and what it returns is returned as-is by C<uplevel>.
 
     sub target {
@@ -351,6 +452,8 @@ The code is executed in the context of the C<uplevel> call, and what it returns 
 
     my @inverses = target(1, 2, 4); # @inverses contains (0, 0.5, 0.25)
     my $count    = target(1, 2, 4); # $count is 3
+
+Note that if C<@args> is empty, then the C<$context> parameter is optional and defaults to the current context ; otherwise it is mandatory.
 
 L<Sub::Uplevel> also implements a pure-Perl version of C<uplevel>.
 Both are identical, with the following caveats :
@@ -586,13 +689,14 @@ Where L</localize>, L</localize_elem> and L</localize_delete> act depending on t
     # $cxt = SCOPE(4), UP SUB UP SUB = UP SUB EVAL = UP CALLER(2) = TOP
     ...
 
-Where L</unwind>, L</want_at> and L</uplevel> point to depending on the C<$cxt>:
+Where L</unwind>, L</yield>, L</want_at>, L</context_info> and L</uplevel> point to depending on the C<$cxt>:
 
     sub {
      eval {
       sub {
        {
-        unwind @things => $cxt;   # or uplevel { ... } $cxt;
+        unwind @things => $cxt;   # or yield @things => $cxt
+                                  # or uplevel { ... } $cxt
         ...
        }
        ...
@@ -608,7 +712,7 @@ Where L</unwind>, L</want_at> and L</uplevel> point to depending on the C<$cxt>:
 
 =head1 EXPORT
 
-The functions L</reap>, L</localize>, L</localize_elem>, L</localize_delete>,  L</unwind>, L</want_at> and L</uplevel> are only exported on request, either individually or by the tags C<':funcs'> and C<':all'>.
+The functions L</reap>, L</localize>, L</localize_elem>, L</localize_delete>,  L</unwind>, L</yield>, L</leave>, L</want_at>, L</context_info> and L</uplevel> are only exported on request, either individually or by the tags C<':funcs'> and C<':all'>.
 
 The constant L</SU_THREADSAFE> is also only exported on request, individually or by the tags C<':consts'> and C<':all'>.
 
@@ -623,7 +727,8 @@ our %EXPORT_TAGS = (
  funcs  => [ qw<
   reap
   localize localize_elem localize_delete
-  unwind want_at
+  unwind yield leave
+  want_at context_info
   uplevel
   uid validate_uid
  > ],
@@ -687,7 +792,12 @@ Despite this shortcoming, this XS version of L</uplevel> should still run way fa
 
 =head1 DEPENDENCIES
 
-L<XSLoader> (standard since perl 5.006).
+L<perl> 5.6.
+
+A C compiler.
+This module may happen to build with a C++ compiler as well, but don't rely on it, as no guarantee is made in this regard.
+
+L<XSLoader> (core since perl 5.006).
 
 =head1 SEE ALSO
 

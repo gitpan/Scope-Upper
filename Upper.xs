@@ -80,6 +80,13 @@ STATIC SV *su_newSV_type(pTHX_ svtype t) {
 # define newSV_type(T) su_newSV_type(aTHX_ (T))
 #endif
 
+#ifdef newSVpvn_flags
+# define su_newmortal_pvn(S, L) newSVpvn_flags((S), (L), SVs_TEMP)
+#else
+# define su_newmortal_pvn(S, L) sv_2mortal(newSVpvn((S), (L)))
+#endif
+#define su_newmortal_pvs(S) su_newmortal_pvn((S), sizeof(S)-1)
+
 #ifndef SvPV_const
 # define SvPV_const(S, L) SvPV(S, L)
 #endif
@@ -116,20 +123,78 @@ STATIC SV *su_newSV_type(pTHX_ svtype t) {
 # define CvISXSUB(C) CvXSUB(C)
 #endif
 
-#ifndef PADLIST_ARRAY
-# define PADLIST_ARRAY(P) AvARRAY(P)
+#ifndef PadlistARRAY
+# define PadlistARRAY(P) AvARRAY(P)
+# define PadARRAY(P)     AvARRAY(P)
 #endif
 
 #ifndef CxHASARGS
 # define CxHASARGS(C) ((C)->blk_sub.hasargs)
 #endif
 
+#ifndef CxGIMME
+# ifdef G_WANT
+#  define CxGIMME(C) ((C)->blk_gimme & G_WANT)
+# else
+#  define CxGIMME(C) ((C)->blk_gimme)
+# endif
+#endif
+
+#ifndef CxOLD_OP_TYPE
+# define CxOLD_OP_TYPE(C) (C)->blk_eval.old_op_type
+#endif
+
+#ifndef OutCopFILE
+# define OutCopFILE(C) CopFILE(C)
+#endif
+
+#ifndef OutCopFILE_len
+# define OutCopFILE_len(C) strlen(OutCopFILE(C))
+#endif
+
+#ifndef CopHINTS_get
+# define CopHINTS_get(C) ((I32) (C)->op_private & HINT_PRIVATE_MASK)
+#endif
+
+#ifndef CopHINTHASH_get
+# define CopHINTHASH_get(C) (C)->cop_hints_hash
+#endif
+
+#ifndef cophh_2hv
+# define COPHH           struct refcounted_he
+# define cophh_2hv(H, F) Perl_refcounted_he_chain_2hv(aTHX_ (H))
+#endif
+
 #ifndef HvNAME_get
 # define HvNAME_get(H) HvNAME(H)
 #endif
 
+#ifndef HvNAMELEN
+# define HvNAMELEN(H) strlen(HvNAME(H))
+#endif
+
 #ifndef gv_fetchpvn_flags
 # define gv_fetchpvn_flags(A, B, C, D) gv_fetchpv((A), (C), (D))
+#endif
+
+#ifndef hv_fetchs
+# define hv_fetchs(H, K, L) hv_fetch((H), (K), sizeof(K)-1, (L))
+#endif
+
+#ifndef OP_GIMME_REVERSE
+STATIC U8 su_op_gimme_reverse(U8 gimme) {
+ switch (gimme) {
+  case G_VOID:
+   return OPf_WANT_VOID;
+  case G_ARRAY:
+   return OPf_WANT_LIST;
+  default:
+   break;
+ }
+
+ return OPf_WANT_SCALAR;
+}
+#define OP_GIMME_REVERSE(G) su_op_gimme_reverse(G)
 #endif
 
 #ifndef PERL_MAGIC_tied
@@ -269,7 +334,6 @@ STATIC void su_uid_storage_dup(pTHX_ su_uid_storage *new_cxt, const su_uid_stora
  if (old_map) {
   su_uid **new_map = new_cxt->map;
   STRLEN old_used  = old_cxt->used;
-  STRLEN old_alloc = old_cxt->alloc;
   STRLEN new_used, new_alloc;
   STRLEN i;
 
@@ -320,6 +384,16 @@ typedef struct {
  LISTOP   return_op;
  OP       proxy_op;
 } su_unwind_storage;
+
+/* --- yield() global storage ---------------------------------------------- */
+
+typedef struct {
+ I32      cxix;
+ I32      items;
+ SV     **savesp;
+ UNOP     leave_op;
+ OP       proxy_op;
+} su_yield_storage;
 
 /* --- uplevel() data tokens and global storage ---------------------------- */
 
@@ -418,6 +492,7 @@ typedef struct {
 typedef struct {
  char               *stack_placeholder;
  su_unwind_storage   unwind_storage;
+ su_yield_storage    yield_storage;
  su_uplevel_storage  uplevel_storage;
  su_uid_storage      uid_storage;
 } my_cxt_t;
@@ -890,12 +965,10 @@ done:
 
 /* --- Pop a context back -------------------------------------------------- */
 
-#if SU_DEBUG
-# ifdef DEBUGGING
-#  define SU_CXNAME PL_block_type[CxTYPE(&cxstack[cxstack_ix])]
-# else
-#  define SU_CXNAME "XXX"
-# endif
+#if SU_DEBUG && defined(DEBUGGING)
+# define SU_CXNAME(C) PL_block_type[CxTYPE(C)]
+#else
+# define SU_CXNAME(C) "XXX"
 #endif
 
 STATIC void su_pop(pTHX_ void *ud) {
@@ -907,7 +980,7 @@ STATIC void su_pop(pTHX_ void *ud) {
   PerlIO_printf(Perl_debug_log,
    "%p: --- pop a %s\n"
    "%p: leave scope     at depth=%2d scope_ix=%2d cur_top=%2d cur_base=%2d\n",
-    ud, SU_CXNAME,
+    ud, SU_CXNAME(cxstack + cxstack_ix),
     ud, depth, PL_scopestack_ix,PL_savestack_ix,PL_scopestack[PL_scopestack_ix])
  );
 
@@ -978,19 +1051,6 @@ STATIC I32 su_init(pTHX_ void *ud, I32 cxix, I32 size) {
  for (i = cxstack_ix; i > cxix; --i) {
   PERL_CONTEXT *cx = cxstack + i;
   switch (CxTYPE(cx)) {
-#if SU_HAS_PERL(5, 10, 0)
-   case CXt_BLOCK:
-    SU_D(PerlIO_printf(Perl_debug_log, "%p: cx %d is block\n", ud, i));
-    /* Given and when blocks are actually followed by a simple block, so skip
-     * it if needed. */
-    if (cxix > 0) { /* Implies i > 0 */
-     PERL_CONTEXT *next = cx - 1;
-     if (CxTYPE(next) == CXt_GIVEN || CxTYPE(next) == CXt_WHEN)
-      --cxix;
-    }
-    depth++;
-    break;
-#endif
 #if SU_HAS_PERL(5, 11, 0)
    case CXt_LOOP_FOR:
    case CXt_LOOP_PLAIN:
@@ -1059,22 +1119,16 @@ STATIC I32 su_init(pTHX_ void *ud, I32 cxix, I32 size) {
 
 STATIC void su_unwind(pTHX_ void *ud_) {
  dMY_CXT;
- I32 cxix    = MY_CXT.unwind_storage.cxix;
- I32 items   = MY_CXT.unwind_storage.items - 1;
- SV **savesp = MY_CXT.unwind_storage.savesp;
+ I32 cxix  = MY_CXT.unwind_storage.cxix;
+ I32 items = MY_CXT.unwind_storage.items;
  I32 mark;
 
  PERL_UNUSED_VAR(ud_);
 
- if (savesp)
-  PL_stack_sp = savesp;
+ PL_stack_sp = MY_CXT.unwind_storage.savesp;
 
  if (cxstack_ix > cxix)
   dounwind(cxix);
-
- /* Hide the level */
- if (items >= 0)
-  PL_stack_sp--;
 
  mark = PL_markstack[cxstack[cxix].blk_oldmarksp];
  *PL_markstack_ptr = PL_stack_sp - PL_stack_base - items;
@@ -1097,23 +1151,181 @@ STATIC void su_unwind(pTHX_ void *ud_) {
  PL_op = &(MY_CXT.unwind_storage.proxy_op);
 }
 
-/* --- Uplevel ------------------------------------------------------------- */
+/* --- Yield --------------------------------------------------------------- */
 
-#ifndef OP_GIMME_REVERSE
-STATIC U8 su_op_gimme_reverse(U8 gimme) {
- switch (gimme) {
-  case G_VOID:
-   return OPf_WANT_VOID;
-  case G_ARRAY:
-   return OPf_WANT_LIST;
+#if SU_HAS_PERL(5, 10, 0)
+# define SU_RETOP_SUB(C)   ((C)->blk_sub.retop)
+# define SU_RETOP_EVAL(C)  ((C)->blk_eval.retop)
+# define SU_RETOP_LOOP(C)  ((C)->blk_loop.my_op->op_lastop->op_next)
+# define SU_RETOP_GIVEN(C) ((C)->blk_givwhen.leave_op->op_next)
+#else
+# define SU_RETOP_SUB(C)  ((C)->blk_oldretsp > 0 ? PL_retstack[(C)->blk_oldretsp - 1] : NULL)
+# define SU_RETOP_EVAL(C) SU_RETOP_SUB(C)
+# define SU_RETOP_LOOP(C) ((C)->blk_loop.last_op->op_next)
+#endif
+
+STATIC void su_yield(pTHX_ void *ud_) {
+ dMY_CXT;
+ PERL_CONTEXT *cx;
+ const char   *which = ud_;
+ I32 cxix      = MY_CXT.yield_storage.cxix;
+ I32 items     = MY_CXT.yield_storage.items;
+ opcode  type  = OP_NULL;
+ U8      flags = 0;
+ OP     *next;
+
+ PERL_UNUSED_VAR(ud_);
+
+ cx = cxstack + cxix;
+ switch (CxTYPE(cx)) {
+  case CXt_BLOCK: {
+   I32 i, cur = cxstack_ix, n = 1;
+   OP *o = NULL;
+   /* Is this actually a given/when block? This may occur only when yield was
+    * called with HERE (or nothing) as the context. */
+#if SU_HAS_PERL(5, 10, 0)
+   if (cxix > 0) {
+    PERL_CONTEXT *prev = cx - 1;
+    U8 type = CxTYPE(prev);
+    if ((type == CXt_GIVEN || type == CXt_WHEN)
+        && (prev->blk_oldcop == cx->blk_oldcop)) {
+     cxix--;
+     cx = prev;
+     if (type == CXt_GIVEN)
+      goto cxt_given;
+     else
+      goto cxt_when;
+    }
+   }
+#endif
+   type  = OP_LEAVE;
+   next  = NULL;
+   /* Bare blocks (that appear as do { ... } blocks, map { ... } blocks or
+    * constant folded blcoks) don't need to save the op to return to anywhere
+    * since 'last' isn't supposed to work inside them. So we climb higher in
+    * the context stack until we reach a context that has a return op (i.e. a
+    * sub, an eval, a format or a real loop), recording how many blocks we
+    * crossed. Then we follow the op_next chain until we get to the leave op
+    * that closes the original block, which we are assured to reach since
+    * everything is static (the blocks we have crossed cannot be evals or
+    * subroutine calls). */
+   for (i = cxix + 1; i <= cur; ++i) {
+    PERL_CONTEXT *cx2 = cxstack + i;
+    switch (CxTYPE(cx2)) {
+     case CXt_BLOCK:
+      ++n;
+      break;
+     case CXt_SUB:
+     case CXt_FORMAT:
+      o = SU_RETOP_SUB(cx2);
+      break;
+     case CXt_EVAL:
+      o = SU_RETOP_EVAL(cx2);
+      break;
+#if SU_HAS_PERL(5, 11, 0)
+     case CXt_LOOP_FOR:
+     case CXt_LOOP_PLAIN:
+     case CXt_LOOP_LAZYSV:
+     case CXt_LOOP_LAZYIV:
+#else
+     case CXt_LOOP:
+#endif
+      o = SU_RETOP_LOOP(cx2);
+      break;
+    }
+    if (o)
+     break;
+   }
+   if (!o)
+    o = PL_op;
+   while (n && o) {
+    /* We may find other enter/leave blocks on our way to the matching leave.
+     * Make sure the depth is incremented/decremented appropriately. */
+    if (o->op_type == OP_ENTER) {
+     ++n;
+    } else if (o->op_type == OP_LEAVE) {
+     --n;
+     if (!n) {
+      next = o->op_next;
+      break;
+     }
+    }
+    o = o->op_next;
+   }
+   break;
+  }
+  case CXt_SUB:
+  case CXt_FORMAT:
+   type = OP_LEAVESUB;
+   next = SU_RETOP_SUB(cx);
+   break;
+  case CXt_EVAL:
+   type = CxTRYBLOCK(cx) ? OP_LEAVETRY : OP_LEAVEEVAL;
+   next = SU_RETOP_EVAL(cx);
+   break;
+#if SU_HAS_PERL(5, 11, 0)
+  case CXt_LOOP_FOR:
+  case CXt_LOOP_PLAIN:
+  case CXt_LOOP_LAZYSV:
+  case CXt_LOOP_LAZYIV:
+#else
+  case CXt_LOOP:
+#endif
+   type = OP_LEAVELOOP;
+   next = SU_RETOP_LOOP(cx);
+   break;
+#if SU_HAS_PERL(5, 10, 0)
+  case CXt_GIVEN:
+cxt_given:
+   type = OP_LEAVEGIVEN;
+   next = SU_RETOP_GIVEN(cx);
+   break;
+  case CXt_WHEN:
+cxt_when:
+#if SU_HAS_PERL(5, 15, 1)
+   type   = OP_LEAVEWHEN;
+#else
+   type   = OP_BREAK;
+   flags |= OPf_SPECIAL;
+#endif
+   next   = NULL;
+   break;
+#endif
+  case CXt_SUBST:
+   croak("%s() can't target a substitution context", which);
+   break;
   default:
+   croak("%s() doesn't know how to leave a %s context",
+          which,                         SU_CXNAME(cxstack + cxix));
    break;
  }
 
- return OPf_WANT_SCALAR;
+ PL_stack_sp = MY_CXT.yield_storage.savesp;
+
+ if (cxstack_ix > cxix)
+  dounwind(cxix);
+
+ /* Copy the arguments passed to yield() where the leave op expects to find
+  * them. */
+ if (items)
+  Move(PL_stack_sp - items + 1, PL_stack_base + cx->blk_oldsp + 1, items, SV *);
+ PL_stack_sp = PL_stack_base + cx->blk_oldsp + items;
+
+ flags |= OP_GIMME_REVERSE(cx->blk_gimme);
+
+ MY_CXT.yield_storage.leave_op.op_type   = type;
+ MY_CXT.yield_storage.leave_op.op_ppaddr = PL_ppaddr[type];
+ MY_CXT.yield_storage.leave_op.op_flags  = flags;
+ MY_CXT.yield_storage.leave_op.op_next   = next;
+
+ PL_op = (OP *) &(MY_CXT.yield_storage.leave_op);
+ PL_op = PL_op->op_ppaddr(aTHX);
+
+ MY_CXT.yield_storage.proxy_op.op_next = PL_op;
+ PL_op = &(MY_CXT.yield_storage.proxy_op);
 }
-#define OP_GIMME_REVERSE(G) su_op_gimme_reverse(G)
-#endif
+
+/* --- Uplevel ------------------------------------------------------------- */
 
 #define SU_UPLEVEL_SAVE(f, t) STMT_START { sud->old_##f = PL_##f; PL_##f = (t); } STMT_END
 #define SU_UPLEVEL_RESTORE(f) STMT_START { PL_##f = sud->old_##f; } STMT_END
@@ -1184,7 +1396,7 @@ STATIC int su_uplevel_goto_static(const OP *o) {
    case OP_GOTO:
     return 1;
    default:
-    if (su_uplevel_goto_static(cUNOPo->op_first))
+    if (su_uplevel_goto_static(((const UNOP *) o)->op_first))
      return 1;
     break;
   }
@@ -1253,7 +1465,7 @@ done:
 
 #endif /* SU_UPLEVEL_HIJACKS_RUNOPS */
 
-#define su_at_underscore(C) AvARRAY(PADLIST_ARRAY(CvPADLIST(C))[CvDEPTH(C)])[0]
+#define su_at_underscore(C) PadARRAY(PadlistARRAY(CvPADLIST(C))[CvDEPTH(C)])[0]
 
 STATIC void su_uplevel_restore(pTHX_ void *sus_) {
  su_uplevel_ud *sud = sus_;
@@ -1797,6 +2009,162 @@ STATIC int su_uid_validate(pTHX_ SV *uid) {
  return su_uid_storage_check(depth, seq);
 }
 
+/* --- Context operations -------------------------------------------------- */
+
+/* Remove sequences of BLOCKs having DB for stash, followed by a SUB context
+ * for the debugger callback. */
+
+STATIC I32 su_context_skip_db(pTHX_ I32 cxix) {
+#define su_context_skip_db(C) su_context_skip_db(aTHX_ (C))
+ I32 i;
+
+ if (!PL_DBsub)
+  return cxix;
+
+ for (i = cxix; i > 0; --i) {
+  PERL_CONTEXT *cx = cxstack + i;
+
+  switch (CxTYPE(cx)) {
+#if SU_HAS_PERL(5, 17, 1)
+   case CXt_LOOP_PLAIN:
+#endif
+   case CXt_BLOCK:
+    if (cx->blk_oldcop && CopSTASH(cx->blk_oldcop) == GvSTASH(PL_DBgv))
+     continue;
+    break;
+   case CXt_SUB:
+    if (cx->blk_sub.cv == GvCV(PL_DBsub)) {
+     cxix = i - 1;
+     continue;
+    }
+    break;
+   default:
+    break;
+  }
+
+  break;
+ }
+
+ return cxix;
+}
+
+
+STATIC I32 su_context_normalize_up(pTHX_ I32 cxix) {
+#define su_context_normalize_up(C) su_context_normalize_up(aTHX_ (C))
+ PERL_CONTEXT *cx;
+
+ if (cxix <= 0)
+  return 0;
+
+ cx = cxstack + cxix;
+ if (CxTYPE(cx) == CXt_BLOCK) {
+  PERL_CONTEXT *prev = cx - 1;
+
+  switch (CxTYPE(prev)) {
+#if SU_HAS_PERL(5, 10, 0)
+   case CXt_GIVEN:
+   case CXt_WHEN:
+#endif
+#if SU_HAS_PERL(5, 11, 0)
+   /* That's the only subcategory that can cause an extra BLOCK context */
+   case CXt_LOOP_PLAIN:
+#else
+   case CXt_LOOP:
+#endif
+    if (cx->blk_oldcop == prev->blk_oldcop)
+     return cxix - 1;
+    break;
+   case CXt_SUBST:
+    if (cx->blk_oldcop && cx->blk_oldcop->op_sibling
+                       && cx->blk_oldcop->op_sibling->op_type == OP_SUBST)
+     return cxix - 1;
+    break;
+  }
+ }
+
+ return cxix;
+}
+
+STATIC I32 su_context_normalize_down(pTHX_ I32 cxix) {
+#define su_context_normalize_down(C) su_context_normalize_down(aTHX_ (C))
+ PERL_CONTEXT *next;
+
+ if (cxix >= cxstack_ix)
+  return cxstack_ix;
+
+ next = cxstack + cxix + 1;
+ if (CxTYPE(next) == CXt_BLOCK) {
+  PERL_CONTEXT *cx = next - 1;
+
+  switch (CxTYPE(cx)) {
+#if SU_HAS_PERL(5, 10, 0)
+   case CXt_GIVEN:
+   case CXt_WHEN:
+#endif
+#if SU_HAS_PERL(5, 11, 0)
+   /* That's the only subcategory that can cause an extra BLOCK context */
+   case CXt_LOOP_PLAIN:
+#else
+   case CXt_LOOP:
+#endif
+    if (cx->blk_oldcop == next->blk_oldcop)
+     return cxix + 1;
+    break;
+   case CXt_SUBST:
+    if (next->blk_oldcop && next->blk_oldcop->op_sibling
+                         && next->blk_oldcop->op_sibling->op_type == OP_SUBST)
+     return cxix + 1;
+    break;
+  }
+ }
+
+ return cxix;
+}
+
+#define su_context_here() su_context_normalize_up(su_context_skip_db(cxstack_ix))
+
+STATIC I32 su_context_gimme(pTHX_ I32 cxix) {
+#define su_context_gimme(C) su_context_gimme(aTHX_ (C))
+ I32 i;
+
+ for (i = cxix; i >= 0; --i) {
+  PERL_CONTEXT *cx = cxstack + i;
+
+  switch (CxTYPE(cx)) {
+   /* gimme is always G_ARRAY for loop contexts. */
+#if SU_HAS_PERL(5, 11, 0)
+   case CXt_LOOP_FOR:
+   case CXt_LOOP_PLAIN:
+   case CXt_LOOP_LAZYSV:
+   case CXt_LOOP_LAZYIV:
+#else
+   case CXt_LOOP:
+#endif
+   case CXt_SUBST: {
+    const COP *cop = cx->blk_oldcop;
+    if (cop && cop->op_sibling) {
+     switch (cop->op_sibling->op_flags & OPf_WANT) {
+      case OPf_WANT_VOID:
+       return G_VOID;
+      case OPf_WANT_SCALAR:
+       return G_SCALAR;
+      case OPf_WANT_LIST:
+       return G_ARRAY;
+      default:
+       break;
+     }
+    }
+    break;
+   }
+   default:
+    return CxGIMME(cx);
+    break;
+  }
+ }
+
+ return G_VOID;
+}
+
 /* --- Interpreter setup/teardown ------------------------------------------ */
 
 STATIC void su_teardown(pTHX_ void *param) {
@@ -1840,6 +2208,14 @@ STATIC void su_setup(pTHX) {
  MY_CXT.unwind_storage.proxy_op.op_type   = OP_STUB;
  MY_CXT.unwind_storage.proxy_op.op_ppaddr = NULL;
 
+ Zero(&(MY_CXT.yield_storage.leave_op), 1, UNOP);
+ MY_CXT.yield_storage.leave_op.op_type   = OP_STUB;
+ MY_CXT.yield_storage.leave_op.op_ppaddr = NULL;
+
+ Zero(&(MY_CXT.yield_storage.proxy_op), 1, OP);
+ MY_CXT.yield_storage.proxy_op.op_type   = OP_STUB;
+ MY_CXT.yield_storage.proxy_op.op_ppaddr = NULL;
+
  MY_CXT.uplevel_storage.top   = NULL;
  MY_CXT.uplevel_storage.root  = NULL;
  MY_CXT.uplevel_storage.count = 0;
@@ -1855,51 +2231,21 @@ STATIC void su_setup(pTHX) {
 
 /* --- XS ------------------------------------------------------------------ */
 
-#if SU_HAS_PERL(5, 8, 9)
-# define SU_SKIP_DB_MAX 2
-#else
-# define SU_SKIP_DB_MAX 3
-#endif
-
-/* Skip context sequences of 1 to SU_SKIP_DB_MAX (included) block contexts
- * followed by a DB sub */
-
-#define SU_SKIP_DB(C) \
- STMT_START {         \
-  I32 skipped = 0;    \
-  PERL_CONTEXT *base = cxstack;      \
-  PERL_CONTEXT *cx   = base + (C);   \
-  while (cx >= base && (C) > skipped && CxTYPE(cx) == CXt_BLOCK) \
-   --cx, ++skipped;                  \
-  if (cx >= base && (C) > skipped) { \
-   switch (CxTYPE(cx)) {  \
-    case CXt_SUB:         \
-     if (skipped <= SU_SKIP_DB_MAX && cx->blk_sub.cv == GvCV(PL_DBsub)) \
-      (C) -= skipped + 1; \
-      break;              \
-    default:              \
-     break;               \
-   }                      \
-  }                       \
- } STMT_END
-
-#define SU_GET_CONTEXT(A, B)   \
- STMT_START {                  \
-  if (items > A) {             \
-   SV *csv = ST(B);            \
-   if (!SvOK(csv))             \
-    goto default_cx;           \
-   cxix = SvIV(csv);           \
-   if (cxix < 0)               \
-    cxix = 0;                  \
-   else if (cxix > cxstack_ix) \
-    cxix = cxstack_ix;         \
-  } else {                     \
-default_cx:                    \
-   cxix = cxstack_ix;          \
-   if (PL_DBsub)               \
-    SU_SKIP_DB(cxix);          \
-  }                            \
+#define SU_GET_CONTEXT(A, B, D) \
+ STMT_START {                   \
+  if (items > A) {              \
+   SV *csv = ST(B);             \
+   if (!SvOK(csv))              \
+    goto default_cx;            \
+   cxix = SvIV(csv);            \
+   if (cxix < 0)                \
+    cxix = 0;                   \
+   else if (cxix > cxstack_ix)  \
+    goto default_cx;            \
+  } else {                      \
+default_cx:                     \
+   cxix = (D);                  \
+  }                             \
  } STMT_END
 
 #define SU_GET_LEVEL(A, B) \
@@ -1915,6 +2261,12 @@ default_cx:                    \
   }                        \
  } STMT_END
 
+#if SU_HAS_PERL(5, 10, 0)
+# define SU_INFO_COUNT 11
+#else
+# define SU_INFO_COUNT 10
+#endif
+
 XS(XS_Scope__Upper_unwind); /* prototype to pass -Wmissing-prototypes */
 
 XS(XS_Scope__Upper_unwind) {
@@ -1929,7 +2281,7 @@ XS(XS_Scope__Upper_unwind) {
  PERL_UNUSED_VAR(cv); /* -W */
  PERL_UNUSED_VAR(ax); /* -Wall */
 
- SU_GET_CONTEXT(0, items - 1);
+ SU_GET_CONTEXT(0, items - 1, cxstack_ix);
  do {
   PERL_CONTEXT *cx = cxstack + cxix;
   switch (CxTYPE(cx)) {
@@ -1938,17 +2290,18 @@ XS(XS_Scope__Upper_unwind) {
      continue;
    case CXt_EVAL:
    case CXt_FORMAT:
-    MY_CXT.unwind_storage.cxix  = cxix;
-    MY_CXT.unwind_storage.items = items;
-    /* pp_entersub will want to sanitize the stack after returning from there
-     * Screw that, we're insane */
-    if (GIMME_V == G_SCALAR) {
-     MY_CXT.unwind_storage.savesp = PL_stack_sp;
-     /* dXSARGS calls POPMARK, so we need to match PL_markstack_ptr[1] */
-     PL_stack_sp = PL_stack_base + PL_markstack_ptr[1] + 1;
-    } else {
-     MY_CXT.unwind_storage.savesp = NULL;
+    MY_CXT.unwind_storage.cxix   = cxix;
+    MY_CXT.unwind_storage.items  = items;
+    MY_CXT.unwind_storage.savesp = PL_stack_sp;
+    if (items > 0) {
+     MY_CXT.unwind_storage.items--;
+     MY_CXT.unwind_storage.savesp--;
     }
+    /* pp_entersub will want to sanitize the stack after returning from there
+     * Screw that, we're insane!
+     * dXSARGS calls POPMARK, so we need to match PL_markstack_ptr[1] */
+    if (GIMME_V == G_SCALAR)
+     PL_stack_sp = PL_stack_base + PL_markstack_ptr[1] + 1;
     SAVEDESTRUCTOR_X(su_unwind, NULL);
     return;
    default:
@@ -1956,6 +2309,63 @@ XS(XS_Scope__Upper_unwind) {
   }
  } while (--cxix >= 0);
  croak("Can't return outside a subroutine");
+}
+
+STATIC const char su_yield_name[] = "yield";
+
+XS(XS_Scope__Upper_yield); /* prototype to pass -Wmissing-prototypes */
+
+XS(XS_Scope__Upper_yield) {
+#ifdef dVAR
+ dVAR; dXSARGS;
+#else
+ dXSARGS;
+#endif
+ dMY_CXT;
+ I32 cxix;
+
+ PERL_UNUSED_VAR(cv); /* -W */
+ PERL_UNUSED_VAR(ax); /* -Wall */
+
+ SU_GET_CONTEXT(0, items - 1, su_context_here());
+ MY_CXT.yield_storage.cxix   = cxix;
+ MY_CXT.yield_storage.items  = items;
+ MY_CXT.yield_storage.savesp = PL_stack_sp;
+ if (items > 0) {
+  MY_CXT.yield_storage.items--;
+  MY_CXT.yield_storage.savesp--;
+ }
+ /* See XS_Scope__Upper_unwind */
+ if (GIMME_V == G_SCALAR)
+  PL_stack_sp = PL_stack_base + PL_markstack_ptr[1] + 1;
+ SAVEDESTRUCTOR_X(su_yield, su_yield_name);
+ return;
+}
+
+STATIC const char su_leave_name[] = "leave";
+
+XS(XS_Scope__Upper_leave); /* prototype to pass -Wmissing-prototypes */
+
+XS(XS_Scope__Upper_leave) {
+#ifdef dVAR
+ dVAR; dXSARGS;
+#else
+ dXSARGS;
+#endif
+ dMY_CXT;
+ I32 cxix;
+
+ PERL_UNUSED_VAR(cv); /* -W */
+ PERL_UNUSED_VAR(ax); /* -Wall */
+
+ MY_CXT.yield_storage.cxix   = su_context_here();
+ MY_CXT.yield_storage.items  = items;
+ MY_CXT.yield_storage.savesp = PL_stack_sp;
+ /* See XS_Scope__Upper_unwind */
+ if (GIMME_V == G_SCALAR)
+  PL_stack_sp = PL_stack_base + PL_markstack_ptr[1] + 1;
+ SAVEDESTRUCTOR_X(su_yield, su_leave_name);
+ return;
 }
 
 MODULE = Scope::Upper            PACKAGE = Scope::Upper
@@ -1976,6 +2386,8 @@ BOOT:
  newCONSTSUB(stash, "SU_THREADSAFE", newSVuv(SU_THREADSAFE));
 
  newXSproto("Scope::Upper::unwind", XS_Scope__Upper_unwind, file, NULL);
+ newXSproto("Scope::Upper::yield",  XS_Scope__Upper_yield,  file, NULL);
+ newXSproto("Scope::Upper::leave",  XS_Scope__Upper_leave,  file, NULL);
 
  su_setup();
 }
@@ -2010,10 +2422,9 @@ void
 HERE()
 PROTOTYPE:
 PREINIT:
- I32 cxix = cxstack_ix;
+ I32 cxix;
 PPCODE:
- if (PL_DBsub)
-  SU_SKIP_DB(cxix);
+ cxix = su_context_here();
  EXTEND(SP, 1);
  mPUSHi(cxix);
  XSRETURN(1);
@@ -2024,11 +2435,12 @@ PROTOTYPE: ;$
 PREINIT:
  I32 cxix;
 PPCODE:
- SU_GET_CONTEXT(0, 0);
- if (--cxix < 0)
-  cxix = 0;
- if (PL_DBsub)
-  SU_SKIP_DB(cxix);
+ SU_GET_CONTEXT(0, 0, su_context_here());
+ if (cxix > 0) {
+  --cxix;
+  cxix = su_context_skip_db(cxix);
+  cxix = su_context_normalize_up(cxix);
+ }
  EXTEND(SP, 1);
  mPUSHi(cxix);
  XSRETURN(1);
@@ -2039,7 +2451,7 @@ PROTOTYPE: ;$
 PREINIT:
  I32 cxix;
 PPCODE:
- SU_GET_CONTEXT(0, 0);
+ SU_GET_CONTEXT(0, 0, cxstack_ix);
  EXTEND(SP, 1);
  for (; cxix >= 0; --cxix) {
   PERL_CONTEXT *cx = cxstack + cxix;
@@ -2061,7 +2473,7 @@ PROTOTYPE: ;$
 PREINIT:
  I32 cxix;
 PPCODE:
- SU_GET_CONTEXT(0, 0);
+ SU_GET_CONTEXT(0, 0, cxstack_ix);
  EXTEND(SP, 1);
  for (; cxix >= 0; --cxix) {
   PERL_CONTEXT *cx = cxstack + cxix;
@@ -2082,19 +2494,13 @@ PREINIT:
  I32 cxix, level;
 PPCODE:
  SU_GET_LEVEL(0, 0);
- cxix = cxstack_ix;
- if (PL_DBsub) {
-  SU_SKIP_DB(cxix);
-  while (cxix > 0) {
-   if (--level < 0)
-    break;
-   --cxix;
-   SU_SKIP_DB(cxix);
-  }
- } else {
-  cxix -= level;
-  if (cxix < 0)
-   cxix = 0;
+ cxix = su_context_here();
+ while (--level >= 0) {
+  if (cxix <= 0)
+   break;
+  --cxix;
+  cxix = su_context_skip_db(cxix);
+  cxix = su_context_normalize_up(cxix);
  }
  EXTEND(SP, 1);
  mPUSHi(cxix);
@@ -2131,12 +2537,14 @@ PROTOTYPE: ;$
 PREINIT:
  I32 cxix;
 PPCODE:
- SU_GET_CONTEXT(0, 0);
+ SU_GET_CONTEXT(0, 0, cxstack_ix);
  EXTEND(SP, 1);
  while (cxix > 0) {
   PERL_CONTEXT *cx = cxstack + cxix--;
   switch (CxTYPE(cx)) {
    case CXt_SUB:
+    if (PL_DBsub && cx->blk_sub.cv == GvCV(PL_DBsub))
+     continue;
    case CXt_EVAL:
    case CXt_FORMAT: {
     I32 gimme = cx->blk_gimme;
@@ -2152,13 +2560,156 @@ PPCODE:
  XSRETURN_UNDEF;
 
 void
+context_info(...)
+PROTOTYPE: ;$
+PREINIT:
+ I32 cxix;
+ const PERL_CONTEXT *cx, *dbcx;
+ COP *cop;
+PPCODE:
+ SU_GET_CONTEXT(0, 0, su_context_skip_db(cxstack_ix));
+ cxix = su_context_normalize_up(cxix);
+ cx   = cxstack + cxix;
+ dbcx = cx;
+ if (PL_DBsub && cxix && (CxTYPE(cx) == CXt_SUB || CxTYPE(cx) == CXt_FORMAT)) {
+  I32 i = su_context_skip_db(cxix - 1) + 1;;
+  if (i < cxix && CxTYPE(cxstack + i) == CXt_SUB)
+   cx = cxstack + i;
+ }
+ cop  = cx->blk_oldcop;
+ EXTEND(SP, SU_INFO_COUNT);
+ /* stash (0) */
+ {
+  HV *stash = CopSTASH(cop);
+  if (stash)
+   PUSHs(su_newmortal_pvn(HvNAME(stash), HvNAMELEN(stash)));
+  else
+   PUSHs(&PL_sv_undef);
+ }
+ /* file (1) */
+ PUSHs(su_newmortal_pvn(OutCopFILE(cop), OutCopFILE_len(cop)));
+ /* line (2) */
+ mPUSHi(CopLINE(cop));
+ /* subroutine (3) and has_args (4) */
+ switch (CxTYPE(cx)) {
+  case CXt_SUB:
+  case CXt_FORMAT: {
+   GV *cvgv = CvGV(dbcx->blk_sub.cv);
+   if (cvgv && isGV(cvgv)) {
+    SV *sv = sv_newmortal();
+    gv_efullname3(sv, cvgv, NULL);
+    PUSHs(sv);
+   } else {
+    PUSHs(su_newmortal_pvs("(unknown)"));
+   }
+   if (CxHASARGS(cx))
+    PUSHs(&PL_sv_yes);
+   else
+    PUSHs(&PL_sv_no);
+   break;
+  }
+  case CXt_EVAL:
+   PUSHs(su_newmortal_pvs("(eval)"));
+   mPUSHi(0);
+   break;
+  default:
+   PUSHs(&PL_sv_undef);
+   PUSHs(&PL_sv_undef);
+ }
+ /* gimme (5) */
+ switch (su_context_gimme(cxix)) {
+  case G_ARRAY:
+   PUSHs(&PL_sv_yes);
+   break;
+  case G_SCALAR:
+   PUSHs(&PL_sv_no);
+   break;
+  default: /* G_VOID */
+   PUSHs(&PL_sv_undef);
+   break;
+ }
+ /* eval text (6) and is_require (7) */
+ switch (CxTYPE(cx)) {
+  case CXt_EVAL:
+   if (CxOLD_OP_TYPE(cx) == OP_ENTEREVAL) {
+    /* eval STRING */
+#if SU_HAS_PERL(5, 17, 4)
+    PUSHs(newSVpvn_flags(SvPVX(cx->blk_eval.cur_text),
+                         SvCUR(cx->blk_eval.cur_text)-2,
+                         SvUTF8(cx->blk_eval.cur_text)|SVs_TEMP));
+#else
+    PUSHs(cx->blk_eval.cur_text);
+#endif
+    PUSHs(&PL_sv_no);
+    break;
+   } else if (cx->blk_eval.old_namesv) {
+    /* require */
+    PUSHs(sv_mortalcopy(cx->blk_eval.old_namesv));
+    PUSHs(&PL_sv_yes);
+    break;
+   }
+   /* FALLTHROUGH */
+  default:
+   /* Anything else including eval BLOCK */
+   PUSHs(&PL_sv_undef);
+   PUSHs(&PL_sv_undef);
+   break;
+ }
+ /* hints (8) */
+ mPUSHi(CopHINTS_get(cop));
+ /* warnings (9) */
+ {
+  SV *mask = NULL;
+#if SU_HAS_PERL(5, 9, 4)
+  STRLEN *old_warnings = cop->cop_warnings;
+#else
+  SV *old_warnings = cop->cop_warnings;
+#endif
+  if (old_warnings == pWARN_NONE ||
+      (old_warnings == pWARN_STD && (PL_dowarn & G_WARN_ON) == 0)) {
+   mask = su_newmortal_pvn(WARN_NONEstring, WARNsize);
+  } else if (old_warnings == pWARN_ALL ||
+             (old_warnings == pWARN_STD && PL_dowarn & G_WARN_ON)) {
+   HV *bits = get_hv("warnings::Bits", 0);
+   if (bits) {
+    SV **bits_all = hv_fetchs(bits, "all", FALSE);
+    if (bits_all)
+     mask = sv_mortalcopy(*bits_all);
+   }
+   if (!mask)
+    mask = su_newmortal_pvn(WARN_ALLstring, WARNsize);
+  } else {
+#if SU_HAS_PERL(5, 9, 4)
+   mask = su_newmortal_pvn((char *) (old_warnings + 1), old_warnings[0]);
+#else
+   mask = sv_mortalcopy(old_warnings);
+#endif
+  }
+  PUSHs(mask);
+ }
+#if SU_HAS_PERL(5, 10, 0)
+ /* hints hash (10) */
+ {
+  COPHH *hints_hash = CopHINTHASH_get(cop);
+  if (hints_hash) {
+   SV *rhv = sv_2mortal(newRV_noinc((SV *) cophh_2hv(hints_hash, 0)));
+   PUSHs(rhv);
+  } else {
+   PUSHs(&PL_sv_undef);
+  }
+ }
+#endif
+ XSRETURN(SU_INFO_COUNT);
+
+void
 reap(SV *hook, ...)
 PROTOTYPE: &;$
 PREINIT:
  I32 cxix;
  su_ud_reap *ud;
 CODE:
- SU_GET_CONTEXT(1, 1);
+ SU_GET_CONTEXT(1, 1, su_context_skip_db(cxstack_ix));
+ cxix = su_context_normalize_down(cxix);
  Newx(ud, 1, su_ud_reap);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_reap;
@@ -2173,7 +2724,8 @@ PREINIT:
  I32 size;
  su_ud_localize *ud;
 CODE:
- SU_GET_CONTEXT(2, 2);
+ SU_GET_CONTEXT(2, 2, su_context_skip_db(cxstack_ix));
+ cxix = su_context_normalize_down(cxix);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
@@ -2190,7 +2742,8 @@ PREINIT:
 CODE:
  if (SvTYPE(sv) >= SVt_PVGV)
   croak("Can't infer the element localization type from a glob and the value");
- SU_GET_CONTEXT(3, 3);
+ SU_GET_CONTEXT(3, 3, su_context_skip_db(cxstack_ix));
+ cxix = su_context_normalize_down(cxix);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
@@ -2209,7 +2762,8 @@ PREINIT:
  I32 size;
  su_ud_localize *ud;
 CODE:
- SU_GET_CONTEXT(2, 2);
+ SU_GET_CONTEXT(2, 2, su_context_skip_db(cxstack_ix));
+ cxix = su_context_normalize_down(cxix);
  Newx(ud, 1, su_ud_localize);
  SU_UD_ORIGIN(ud)  = NULL;
  SU_UD_HANDLER(ud) = su_localize;
@@ -2226,7 +2780,7 @@ PPCODE:
   code = SvRV(code);
  if (SvTYPE(code) < SVt_PVCV)
   croak("First argument to uplevel must be a code reference");
- SU_GET_CONTEXT(1, items - 1);
+ SU_GET_CONTEXT(1, items - 1, cxstack_ix);
  do {
   PERL_CONTEXT *cx = cxstack + cxix;
   switch (CxTYPE(cx)) {
@@ -2257,7 +2811,7 @@ PREINIT:
  I32 cxix;
  SV *uid;
 PPCODE:
- SU_GET_CONTEXT(0, 0);
+ SU_GET_CONTEXT(0, 0, su_context_here());
  uid = su_uid_get(cxix);
  EXTEND(SP, 1);
  PUSHs(uid);
