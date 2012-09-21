@@ -2572,7 +2572,7 @@ PPCODE:
  cx   = cxstack + cxix;
  dbcx = cx;
  if (PL_DBsub && cxix && (CxTYPE(cx) == CXt_SUB || CxTYPE(cx) == CXt_FORMAT)) {
-  I32 i = su_context_skip_db(cxix - 1) + 1;;
+  I32 i = su_context_skip_db(cxix - 1) + 1;
   if (i < cxix && CxTYPE(cxstack + i) == CXt_SUB)
    cx = cxstack + i;
  }
@@ -2665,12 +2665,22 @@ PPCODE:
 #else
   SV *old_warnings = cop->cop_warnings;
 #endif
-  if (old_warnings == pWARN_NONE ||
-      (old_warnings == pWARN_STD && (PL_dowarn & G_WARN_ON) == 0)) {
+  if (old_warnings == pWARN_STD) {
+   if (PL_dowarn & G_WARN_ON)
+    goto context_info_warnings_on;
+   else
+#if SU_HAS_PERL(5, 17, 4)
+    mask = &PL_sv_undef;
+#else
+    goto context_info_warnings_off;
+#endif
+  } else if (old_warnings == pWARN_NONE) {
+context_info_warnings_off:
    mask = su_newmortal_pvn(WARN_NONEstring, WARNsize);
-  } else if (old_warnings == pWARN_ALL ||
-             (old_warnings == pWARN_STD && PL_dowarn & G_WARN_ON)) {
-   HV *bits = get_hv("warnings::Bits", 0);
+  } else if (old_warnings == pWARN_ALL) {
+   HV *bits;
+context_info_warnings_on:
+   bits = get_hv("warnings::Bits", 0);
    if (bits) {
     SV **bits_all = hv_fetchs(bits, "all", FALSE);
     if (bits_all)
