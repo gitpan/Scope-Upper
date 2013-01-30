@@ -1,4 +1,4 @@
-use 5.006;
+use 5.006001;
 
 use strict;
 use warnings;
@@ -63,6 +63,7 @@ my %PREREQ_PM = (
 
 my %BUILD_REQUIRES = (
  'ExtUtils::MakeMaker' => 0,
+ 'Config'              => 0,
  'Test::More'          => 0,
  %PREREQ_PM,
 );
@@ -94,7 +95,7 @@ WriteMakefile(
  @DEFINES,
  BUILD_REQUIRES   => \%BUILD_REQUIRES,
  PREREQ_PM        => \%PREREQ_PM,
- MIN_PERL_VERSION => '5.006',
+ MIN_PERL_VERSION => '5.006001',
  META_MERGE       => \%META,
  dist             => {
   PREOP    => "pod2text -u $file > \$(DISTVNAME)/README",

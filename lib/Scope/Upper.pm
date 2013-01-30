@@ -9,13 +9,13 @@ Scope::Upper - Act on upper scopes.
 
 =head1 VERSION
 
-Version 0.21
+Version 0.22
 
 =cut
 
 our $VERSION;
 BEGIN {
- $VERSION = '0.21';
+ $VERSION = '0.22';
 }
 
 =head1 SYNOPSIS
@@ -792,7 +792,7 @@ Despite this shortcoming, this XS version of L</uplevel> should still run way fa
 
 =head1 DEPENDENCIES
 
-L<perl> 5.6.
+L<perl> 5.6.1.
 
 A C compiler.
 This module may happen to build with a C++ compiler as well, but don't rely on it, as no guarantee is made in this regard.
@@ -839,7 +839,7 @@ Thanks to Shawn M. Moore for motivation.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2008,2009,2010,2011,2012 Vincent Pit, all rights reserved.
+Copyright 2008,2009,2010,2011,2012,2013 Vincent Pit, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 
