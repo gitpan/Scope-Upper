@@ -197,6 +197,10 @@ STATIC U8 su_op_gimme_reverse(U8 gimme) {
 #define OP_GIMME_REVERSE(G) su_op_gimme_reverse(G)
 #endif
 
+#ifndef OP_SIBLING
+# define OP_SIBLING(O) ((O)->op_sibling)
+#endif
+
 #ifndef PERL_MAGIC_tied
 # define PERL_MAGIC_tied 'P'
 #endif
@@ -1401,7 +1405,7 @@ STATIC void su_uplevel_storage_delete(pTHX_ su_uplevel_ud *sud) {
 }
 
 STATIC int su_uplevel_goto_static(const OP *o) {
- for (; o; o = o->op_sibling) {
+ for (; o; o = OP_SIBLING(o)) {
   /* goto ops are unops with kids. */
   if (!(o->op_flags & OPf_KIDS))
    continue;
@@ -1664,6 +1668,9 @@ STATIC CV *su_cv_clone(pTHX_ CV *proto, GV *gv) {
 #endif
 
  CvGV_set(cv, gv);
+#if SU_RELEASE && SU_HAS_PERL_EXACT(5, 21, 4)
+ CvNAMED_off(cv);
+#endif
  CvSTASH_set(cv, CvSTASH(proto));
  /* Commit 4c74a7df, publicized with perl 5.13.3, began to add backrefs to
   * stashes. CvSTASH_set() started to do it as well with commit c68d95645
@@ -2093,8 +2100,8 @@ STATIC I32 su_context_normalize_up(pTHX_ I32 cxix) {
      return cxix - 1;
     break;
    case CXt_SUBST:
-    if (cx->blk_oldcop && cx->blk_oldcop->op_sibling
-                       && cx->blk_oldcop->op_sibling->op_type == OP_SUBST)
+    if (cx->blk_oldcop && OP_SIBLING(cx->blk_oldcop)
+                       && OP_SIBLING(cx->blk_oldcop)->op_type == OP_SUBST)
      return cxix - 1;
     break;
   }
@@ -2129,8 +2136,8 @@ STATIC I32 su_context_normalize_down(pTHX_ I32 cxix) {
      return cxix + 1;
     break;
    case CXt_SUBST:
-    if (next->blk_oldcop && next->blk_oldcop->op_sibling
-                         && next->blk_oldcop->op_sibling->op_type == OP_SUBST)
+    if (next->blk_oldcop && OP_SIBLING(next->blk_oldcop)
+                         && OP_SIBLING(next->blk_oldcop)->op_type == OP_SUBST)
      return cxix + 1;
     break;
   }
@@ -2160,8 +2167,8 @@ STATIC I32 su_context_gimme(pTHX_ I32 cxix) {
 #endif
    case CXt_SUBST: {
     const COP *cop = cx->blk_oldcop;
-    if (cop && cop->op_sibling) {
-     switch (cop->op_sibling->op_flags & OPf_WANT) {
+    if (cop && OP_SIBLING(cop)) {
+     switch (OP_SIBLING(cop)->op_flags & OPf_WANT) {
       case OPf_WANT_VOID:
        return G_VOID;
       case OPf_WANT_SCALAR:
